@@ -130,8 +130,12 @@ func (h *Handler) APIUsers(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type UR struct {
-		ID, PhoneHash, DisplayName, Status string
-		CreatedAt, LastSeen                 *time.Time
+		ID          string     `json:"id"`
+		PhoneHash   string     `json:"phone_hash"`
+		DisplayName string     `json:"display_name"`
+		Status      string     `json:"status"`
+		CreatedAt   *time.Time `json:"created_at"`
+		LastSeen    *time.Time `json:"last_seen"`
 	}
 	users := []UR{}
 	for rows.Next() {
@@ -238,11 +242,19 @@ func (h *Handler) APICDR(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type CDR struct {
-		ID, CallID, CallerID, CalleeID, Direction, Status string
-		StartedAt, EndedAt                                 *time.Time
-		DurationSecs, AvgBitrate                           int
-		Codec                                              string
-		PacketLoss, RTT                                    float64
+		ID           int        `json:"id"`
+		CallID       string     `json:"call_id"`
+		CallerID     string     `json:"caller_id"`
+		CalleeID     string     `json:"callee_id"`
+		Direction    string     `json:"direction"`
+		Status       string     `json:"status"`
+		StartedAt    *time.Time `json:"started_at"`
+		EndedAt      *time.Time `json:"ended_at"`
+		DurationSecs int        `json:"duration_secs"`
+		AvgBitrate   int        `json:"avg_bitrate"`
+		Codec        string     `json:"codec"`
+		PacketLoss   float64    `json:"packet_loss"`
+		RTT          float64    `json:"rtt"`
 	}
 	cdrs := []CDR{}
 	for rows.Next() {
