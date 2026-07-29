@@ -43,6 +43,31 @@ func (db *DB) Migrate() error {
 			user_id TEXT PRIMARY KEY REFERENCES users(id),
 			key_id INTEGER NOT NULL, public_key TEXT NOT NULL,
 			signature TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'`,
+		`CREATE TABLE IF NOT EXISTS cdr (
+			id SERIAL PRIMARY KEY,
+			call_id TEXT NOT NULL,
+			caller_id TEXT NOT NULL,
+			callee_id TEXT NOT NULL,
+			direction TEXT NOT NULL DEFAULT 'outgoing',
+			status TEXT NOT NULL DEFAULT 'unknown',
+			started_at TIMESTAMPTZ NOT NULL,
+			ended_at TIMESTAMPTZ,
+			duration_secs INTEGER DEFAULT 0,
+			codec TEXT DEFAULT 'opus',
+			avg_bitrate_kbps INTEGER DEFAULT 0,
+			packet_loss_pct REAL DEFAULT 0,
+			rtt_ms REAL DEFAULT 0,
+			caller_ip TEXT DEFAULT '',
+			callee_ip TEXT DEFAULT '')`,
+		`CREATE INDEX IF NOT EXISTS idx_cdr_started ON cdr(started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_cdr_caller ON cdr(caller_id)`,
+		`CREATE TABLE IF NOT EXISTS admin_logs (
+			id SERIAL PRIMARY KEY,
+			action TEXT NOT NULL,
+			detail TEXT DEFAULT '',
+			operator TEXT DEFAULT 'system',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	}
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil {

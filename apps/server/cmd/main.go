@@ -69,11 +69,7 @@ func main() {
 		signaling.HandleWebSocket(hub, w, r)
 	}))
 
-	// Admin dashboard (no auth for dev convenience; add auth in production)
-	r.Get("/admin", adminHandler.RenderDashboard)
-	r.Get("/admin/", adminHandler.RenderDashboard)
-	r.Get("/admin/api/stats", adminHandler.APIStats)
-	r.Get("/admin/api/users", adminHandler.APIUsers)
+	adminHandler.RegisterRoutes(r)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
