@@ -9,15 +9,11 @@ import 'package:path/path.dart' as p;
 class DatabaseManager {
   static DatabaseManager? _instance;
   sqflite.Database? _db;
-  String? _dbPassword;
-
   DatabaseManager._();
   static DatabaseManager get instance {
     _instance ??= DatabaseManager._();
     return _instance!;
   }
-
-  void setEncryptionKey(String key) => _dbPassword = key;
 
   Future<sqflite.Database> get database async {
     if (_db != null) return _db!;
@@ -28,14 +24,10 @@ class DatabaseManager {
   Future<sqflite.Database> _initDb() async {
     final dir = await getApplicationDocumentsDirectory();
     final path = p.join(dir.path, 'myphone.db');
-    final pw = _dbPassword;
 
     return await sqflite.openDatabase(
       path,
       version: 1,
-      onConfigure: pw != null
-          ? (db) async => db.execute("PRAGMA key = '$pw';")
-          : null,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE contacts (

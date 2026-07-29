@@ -1,21 +1,17 @@
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app/router.dart';
 import 'app/theme.dart';
-import 'core/storage/database.dart';
-import 'core/storage/key_manager.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  final dbKey = await KeyManager.getOrCreateDbKey();
-  DatabaseManager.instance.setEncryptionKey(dbKey);
-
-  runApp(
-    const ProviderScope(
-      child: MyPhoneApp(),
-    ),
-  );
+void main() {
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    runApp(const ProviderScope(child: MyPhoneApp()));
+  }, (error, stack) {
+    debugPrint('FATAL: $error\n$stack');
+  });
 }
 
 class MyPhoneApp extends ConsumerWidget {
