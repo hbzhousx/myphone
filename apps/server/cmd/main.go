@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/cors"
 	_ "github.com/lib/pq"
 
+	"github.com/myphone/server/internal/admin"
 	"github.com/myphone/server/internal/api"
 	"github.com/myphone/server/internal/discovery"
 	"github.com/myphone/server/internal/models"
@@ -42,6 +43,7 @@ func main() {
 	authHandler := api.NewAuthHandler(db, redisClient)
 	keysHandler := api.NewKeysHandler(db)
 	contactDiscovery := discovery.NewContactDiscovery(db)
+	adminHandler := admin.NewHandler(db, hub.Stats)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -66,6 +68,12 @@ func main() {
 	r.Get("/ws", api.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		signaling.HandleWebSocket(hub, w, r)
 	}))
+
+	// Admin dashboard (no auth for dev convenience; add auth in production)
+	r.Get("/admin", adminHandler.RenderDashboard)
+	r.Get("/admin/", adminHandler.RenderDashboard)
+	r.Get("/admin/api/stats", adminHandler.APIStats)
+	r.Get("/admin/api/users", adminHandler.APIUsers)
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
