@@ -1,0 +1,57 @@
+package models
+
+import (
+	"database/sql"
+	"fmt"
+	"time"
+
+	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
+)
+
+type DB struct{ *sql.DB }
+type Client = redis.Client
+
+func NewDB(connStr string) (*DB, error) {
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("sql.Open: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("db.Ping: %w", err)
+	}
+	return &DB{db}, nil
+}
+
+func (db *DB) Migrate() error {
+	migrations := []string{
+		`CREATE TABLE IF NOT EXISTS users (
+			id TEXT PRIMARY KEY, phone_hash TEXT UNIQUE NOT NULL,
+			display_name TEXT NOT NULL DEFAULT '',
+			identity_public_key TEXT NOT NULL, password_hash TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE INDEX IF NOT EXISTS idx_users_phone_hash ON users(phone_hash)`,
+		`CREATE TABLE IF NOT EXISTS pre_keys (
+			id SERIAL PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+			key_id INTEGER NOT NULL, public_key TEXT NOT NULL,
+			is_used BOOLEAN NOT NULL DEFAULT FALSE, UNIQUE(user_id, key_id))`,
+		`CREATE TABLE IF NOT EXISTS signed_pre_keys (
+			user_id TEXT PRIMARY KEY REFERENCES users(id),
+			key_id INTEGER NOT NULL, public_key TEXT NOT NULL,
+			signature TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+	}
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil {
+			return fmt.Errorf("migration: %w", err)
+		}
+	}
+	return nil
+}
+
+func NewRedisClient(addr string) *redis.Client {
+	return redis.NewClient(&redis.Options{Addr: addr, Password: "", DB: 0})
+}

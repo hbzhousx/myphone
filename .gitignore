@@ -1,0 +1,41 @@
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+*.iml
+*.lock
+.metadata
+*.g.dart
+*.freezed.dart
+
+# Android
+**/android/.gradle/
+**/android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Go
+**/server/tmp/
+**/server/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Temp
+tmp/
+/tmp/
