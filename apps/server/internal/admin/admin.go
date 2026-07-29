@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -31,6 +33,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 
 	// API: Users
 	r.Get("/admin/api/users", h.APIUsers)
+	r.Post("/admin/api/users/create", h.APICreateUser)
 	r.Get("/admin/api/users/{userID}", h.APIUserDetail)
 	r.Post("/admin/api/users/{userID}/disable", h.APIDisableUser)
 	r.Post("/admin/api/users/{userID}/enable", h.APIEnableUser)
@@ -139,6 +142,41 @@ func (h *Handler) APIUsers(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"users": users, "total": total, "page": page, "total_pages": (total+limit-1)/limit,
 	})
+}
+
+func (h *Handler) APICreateUser(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PhoneNumber       string `json:"phone_number"`
+		Password          string `json:"password"`
+		DisplayName       string `json:"display_name"`
+		IdentityPublicKey string `json:"identity_public_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if req.PhoneNumber == "" || req.Password == "" {
+		http.Error(w, `{"error":"phone_number and password required"}`, http.StatusBadRequest)
+		return
+	}
+	if req.DisplayName == "" {
+		req.DisplayName = req.PhoneNumber
+	}
+	if req.IdentityPublicKey == "" {
+		req.IdentityPublicKey = "admin-created"
+	}
+
+	_, err := h.db.Exec(
+		`INSERT INTO users (id, phone_hash, display_name, identity_public_key, password_hash) VALUES ($1,$2,$3,$4,$5)`,
+		generateID(), hashPhone(req.PhoneNumber), req.DisplayName,
+		req.IdentityPublicKey, hashPassword(req.Password),
+	)
+	if err != nil {
+		http.Error(w, `{"error":"user already exists"}`, http.StatusConflict)
+		return
+	}
+	h.logAdmin("create_user", req.PhoneNumber)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (h *Handler) APIUserDetail(w http.ResponseWriter, r *http.Request) {
@@ -273,6 +311,24 @@ func (h *Handler) logAdmin(action, detail string) {
 	h.db.Exec("INSERT INTO admin_logs (action, detail, operator) VALUES ($1,$2,'admin')", action, detail)
 }
 
+func generateID() string {
+	b := make([]byte, 16)
+	for i := range b {
+		b[i] = byte(time.Now().UnixNano()>>(i*4)) ^ byte(i*7)
+	}
+	return fmt.Sprintf("%x", b)
+}
+
+func hashPhone(phone string) string {
+	h := sha256.Sum256([]byte("myphone-salt:" + phone))
+	return hex.EncodeToString(h[:])
+}
+
+func hashPassword(pw string) string {
+	h := sha256.Sum256([]byte(pw))
+	return hex.EncodeToString(h[:])
+}
+
 // ======== Admin HTML SPA ========
 
 const adminHTML = `<!DOCTYPE html>
@@ -354,6 +410,7 @@ pre{background:#0a1118;padding:16px;border-radius:8px;font-size:12px;overflow-x:
   <input type="text" id="us-search" placeholder="搜索 ID / 手机号哈希..." onkeydown="if(event.key==='Enter')loadUsers()">
   <select id="us-status" onchange="loadUsers()"><option value="">全部状态</option><option value="active">已启用</option><option value="disabled">已禁用</option></select>
   <button class="btn primary sm" onclick="loadUsers()">搜索</button>
+  <button class="btn primary sm" onclick="showCreateForm()">＋ 添加用户</button>
 </div>
 <table><thead><tr><th>用户ID</th><th>状态</th><th>注册时间</th><th>操作</th></tr></thead><tbody id="us-table"></tbody></table>
 <div class="pagination" id="us-pager"></div>
@@ -463,6 +520,27 @@ async function showUserDetail(uid){
 }
 function closeModal(){document.getElementById('user-modal').classList.remove('active');document.getElementById('user-modal').onclick=null}
 document.getElementById('user-modal').onclick=function(e){if(e.target===this)closeModal()}
+function showCreateForm(){
+ document.getElementById('user-modal-content').innerHTML=
+  '<h3>添加用户</h3>'+
+  '<div style="display:flex;flex-direction:column;gap:12px">'+
+  '<div><label style="font-size:12px;color:#8899a6">手机号</label><input id="cu-phone" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid #253545;background:#0f1923;color:#e0e6ed;font-size:14px;margin-top:4px" placeholder="+8613800138000"></div>'+
+  '<div><label style="font-size:12px;color:#8899a6">密码</label><input id="cu-pw" type="password" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid #253545;background:#0f1923;color:#e0e6ed;font-size:14px;margin-top:4px" placeholder="至少6位"></div>'+
+  '<div><label style="font-size:12px;color:#8899a6">显示名称 (可选)</label><input id="cu-name" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid #253545;background:#0f1923;color:#e0e6ed;font-size:14px;margin-top:4px" placeholder="张三"></div>'+
+  '</div>'+
+  '<div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">'+
+  '<button class="btn sm" onclick="closeModal()">取消</button>'+
+  '<button class="btn sm primary" onclick="createUser()">创建</button></div>';
+ document.getElementById('user-modal').classList.add('active');
+}
+async function createUser(){
+ const phone=document.getElementById('cu-phone').value.trim();
+ const pw=document.getElementById('cu-pw').value;
+ const name=document.getElementById('cu-name').value.trim();
+ if(!phone||!pw){toastShow('手机号和密码必填','error');return}
+ const r=await fetch('/admin/api/users/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone_number:phone,password:pw,display_name:name})});
+ if(r.ok){toastShow('用户创建成功','success');closeModal();loadUsers()}else{const e=await r.json();toastShow('创建失败: '+e.error,'error')}
+}
 
 async function disableUser(uid){
  if(!confirm('确认禁用用户 '+uid+' ?')) return;
