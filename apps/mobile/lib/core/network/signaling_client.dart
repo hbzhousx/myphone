@@ -7,6 +7,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../../app/auth_guard.dart';
+import 'server_config.dart';
 
 enum CallSignalType {
   offer,
@@ -50,7 +51,7 @@ class CallSignal {
 }
 
 class SignalingClient {
-  final String _baseUrl = 'wss://api.myphone.example.com/ws';
+  final String _baseUrl = ServerConfig.wsEndpoint;
   WebSocketChannel? _channel;
   final _signalController = StreamController<CallSignal>.broadcast();
   Timer? _pingTimer;

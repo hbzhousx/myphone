@@ -4,9 +4,10 @@ library;
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../../app/auth_guard.dart';
+import 'server_config.dart';
 
 class ApiClient {
-  static const _baseUrl = 'https://api.myphone.example.com/v1';
+  final String _baseUrl = ServerConfig.apiBase;
   final http.Client _client;
 
   ApiClient({http.Client? client}) : _client = client ?? http.Client();
