@@ -1,9 +1,8 @@
-/// Encrypted local database using SQLCipher via sqflite FFI.
-/// All data at rest is AES-256-GCM encrypted.
+/// Encrypted local database using SQLCipher via sqflite platform channel.
+/// Android: sqlcipher_flutter_libs replaces native SQLite with SQLCipher .so
 library;
 
 import 'package:sqflite/sqflite.dart' as sqflite;
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 
@@ -31,42 +30,38 @@ class DatabaseManager {
     final path = p.join(dir.path, 'myphone.db');
     final pw = _dbPassword;
 
-    return await databaseFactoryFfi.openDatabase(
+    return await sqflite.openDatabase(
       path,
-      options: sqflite.OpenDatabaseOptions(
-        version: 1,
-        onConfigure: pw != null
-            ? (db) async {
-                await db.execute("PRAGMA key = '$pw';");
-              }
-            : null,
-        onCreate: (db, version) async {
-          await db.execute('''
-            CREATE TABLE contacts (
-              id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
-              phone_hash TEXT NOT NULL, public_key_fingerprint TEXT,
-              avatar_path TEXT, last_seen INTEGER,
-              is_registered INTEGER DEFAULT 0,
-              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
-          ''');
-          await db.execute('''
-            CREATE TABLE call_history (
-              id TEXT PRIMARY KEY, contact_id TEXT NOT NULL,
-              direction TEXT NOT NULL CHECK(direction IN ('outgoing','incoming','missed')),
-              status TEXT NOT NULL CHECK(status IN ('answered','missed','rejected','busy')),
-              duration_seconds INTEGER DEFAULT 0,
-              call_type TEXT NOT NULL DEFAULT 'audio',
-              codec_used TEXT, avg_bitrate_bps INTEGER,
-              started_at INTEGER NOT NULL, ended_at INTEGER,
-              FOREIGN KEY (contact_id) REFERENCES contacts(id))
-          ''');
-          await db.execute('''
-            CREATE TABLE key_store (
-              key_type TEXT PRIMARY KEY, key_data BLOB NOT NULL,
-              created_at INTEGER NOT NULL)
-          ''');
-        },
-      ),
+      version: 1,
+      onConfigure: pw != null
+          ? (db) async => db.execute("PRAGMA key = '$pw';")
+          : null,
+      onCreate: (db, version) async {
+        await db.execute('''
+          CREATE TABLE contacts (
+            id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+            phone_hash TEXT NOT NULL, public_key_fingerprint TEXT,
+            avatar_path TEXT, last_seen INTEGER,
+            is_registered INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
+        ''');
+        await db.execute('''
+          CREATE TABLE call_history (
+            id TEXT PRIMARY KEY, contact_id TEXT NOT NULL,
+            direction TEXT NOT NULL CHECK(direction IN ('outgoing','incoming','missed')),
+            status TEXT NOT NULL CHECK(status IN ('answered','missed','rejected','busy')),
+            duration_seconds INTEGER DEFAULT 0,
+            call_type TEXT NOT NULL DEFAULT 'audio',
+            codec_used TEXT, avg_bitrate_bps INTEGER,
+            started_at INTEGER NOT NULL, ended_at INTEGER,
+            FOREIGN KEY (contact_id) REFERENCES contacts(id))
+        ''');
+        await db.execute('''
+          CREATE TABLE key_store (
+            key_type TEXT PRIMARY KEY, key_data BLOB NOT NULL,
+            created_at INTEGER NOT NULL)
+        ''');
+      },
     );
   }
 
