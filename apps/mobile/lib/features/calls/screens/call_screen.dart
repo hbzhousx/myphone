@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../call_state.dart';
+import '../ringtone_service.dart';
+import '../../../core/network/api_client.dart';
+import '../../../core/storage/database.dart';
 import '../../../core/webrtc/webrtc_manager.dart';
 
 class CallScreen extends ConsumerStatefulWidget {
@@ -13,18 +17,148 @@ class CallScreen extends ConsumerStatefulWidget {
 }
 
 class _CallScreenState extends ConsumerState<CallScreen> {
+  static String _initial(String name) => name.isNotEmpty ? name[0].toUpperCase() : '?';
+  bool _isMuted = false;
+  bool _isSpeakerOn = false;
+  bool _hasCall = false;
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(callStateProvider.notifier).startOutgoingCall(widget.contactId, widget.contactId);
-    });
+    // Don't await the async init — let the UI render the loading state
+    // while microphone permission and WebRTC initialize in the background.
+    _initCall();
+  }
+
+  Future<void> _initCall() async {
+    // Small delay to let the UI frame render first.
+    await Future.delayed(const Duration(milliseconds: 100));
+    final existingCall = ref.read(callStateProvider);
+    if (existingCall != null) return;
+
+    // Ensure microphone permission before starting the call.
+    var micStatus = await Permission.microphone.status;
+    if (!micStatus.isGranted) {
+      micStatus = await Permission.microphone.request();
+    }
+    if (!micStatus.isGranted) {
+      debugPrint('[CALL] microphone permission denied ($micStatus)');
+      if (mounted) {
+        final action = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Microphone Required'),
+            content: const Text('MyPhone needs microphone access to make calls. Please grant permission in Settings.'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+              TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Open Settings')),
+            ],
+          ),
+        );
+        if (action == true) {
+          await openAppSettings();
+        }
+        if (mounted) context.go('/dialer');
+      }
+      return;
+    }
+
+    // Resolve display name: local contact → server lookup → fallback to id.
+    var displayName = widget.contactId;
+    try {
+      final contact = await DatabaseManager.instance.getContact(widget.contactId);
+      if (contact != null && contact['display_name'] is String && (contact['display_name'] as String).isNotEmpty) {
+        displayName = contact['display_name'] as String;
+      } else {
+        // Not in local contacts (e.g. redial from history) — ask the server.
+        final client = ApiClient();
+        try {
+          final info = await client.lookupUserById(widget.contactId);
+          if (info != null) {
+            final name = info['display_name'] as String?;
+            if (name != null && name.isNotEmpty) {
+              displayName = name;
+            }
+          }
+        } finally {
+          client.dispose();
+        }
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+    try {
+      await ref.read(callStateProvider.notifier).startOutgoingCall(widget.contactId, displayName);
+      // Default to earpiece (not speakerphone) for privacy and to reduce echo.
+      final activeCall = ref.read(callStateProvider);
+      if (activeCall != null) {
+        await activeCall.webrtc.setSpeakerOn(false);
+      }
+    } on CallNotFoundException catch (e) {
+      debugPrint('[CALL] number not found: $e');
+      if (mounted) {
+        // Play a short "number not found" tone, then return to dialer.
+        RingtoneService.playNumberNotFound();
+        await Future.delayed(const Duration(seconds: 2));
+        RingtoneService.stop();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('The number you dialed does not exist. Please dial again.')),
+          );
+          context.go('/dialer');
+        }
+      }
+    } catch (e) {
+      debugPrint('[CALL] startOutgoingCall failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to start call: $e')),
+        );
+        context.go('/dialer');
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    RingtoneService.stop();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final call = ref.watch(callStateProvider);
-    final networkTier = call?.networkMonitor.currentTier;
+
+    if (call != null) {
+      _hasCall = true;
+    }
+
+    // Call was active but now ended — navigate away.
+    if (call == null && _hasCall) {
+      RingtoneService.stop();
+      _hasCall = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) context.go('/dialer');
+      });
+      return const SizedBox.shrink();
+    }
+
+    // Initial loading — call hasn't started yet.
+    if (call == null) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF1A1A2E),
+        body: Center(child: CircularProgressIndicator(color: Colors.white)),
+      );
+    }
+
+    // Play ringback on outgoing calls; stop when connected or ended.
+    if (call.status == CallStatus.ringing && !call.isIncoming) {
+      RingtoneService.playRingback();
+    } else {
+      RingtoneService.stop();
+    }
+    final networkTier = call.networkMonitor.currentTier;
+    final e2ee = call.e2eeSnapshot;
 
     return Scaffold(
       backgroundColor: const Color(0xFF1A1A2E),
@@ -33,25 +167,84 @@ class _CallScreenState extends ConsumerState<CallScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             const Spacer(flex: 2),
-            CircleAvatar(radius: 48, backgroundColor: Colors.white24, child: Text(widget.contactId[0].toUpperCase(), style: const TextStyle(fontSize: 36, color: Colors.white))),
+            CircleAvatar(
+                radius: 48,
+                backgroundColor: Colors.white24,
+                child: Text(_initial(call.contactName),
+                    style: const TextStyle(fontSize: 36, color: Colors.white))),
             const SizedBox(height: 16),
-            Text(widget.contactId, style: const TextStyle(fontSize: 24, color: Colors.white, fontWeight: FontWeight.w600)),
+            Text(call.contactName,
+                style: const TextStyle(
+                    fontSize: 24,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),
-            Text(_statusText(call?.status), style: const TextStyle(fontSize: 16, color: Colors.white70)),
-            if (networkTier != null) ...[const SizedBox(height: 8), _NetworkQualityBadge(tier: networkTier)],
-            if (call?.status == CallStatus.connected) ...[const SizedBox(height: 8), Text(call!.formattedDuration, style: const TextStyle(fontSize: 20, color: Colors.white))],
+            Text(_statusText(call.status, e2ee.isEncrypted),
+                style: const TextStyle(fontSize: 16, color: Colors.white70)),
+            const SizedBox(height: 8),
+            Text(
+              e2ee.status,
+              style: TextStyle(
+                fontSize: 13,
+                color: e2ee.isEncrypted ? Colors.greenAccent : Colors.orangeAccent,
+              ),
+            ),
+            if (e2ee.peerFingerprint != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'Peer Fingerprint: ${e2ee.peerFingerprint}',
+                  style: const TextStyle(fontSize: 11, color: Colors.white60),
+                ),
+              ),
+            if (networkTier != null) ...[
+              const SizedBox(height: 8),
+              _NetworkQualityBadge(tier: networkTier)
+            ],
+            if (call.status == CallStatus.connected) ...[
+              const SizedBox(height: 8),
+              Text(call.formattedDuration,
+                  style: const TextStyle(fontSize: 20, color: Colors.white))
+            ],
             const Spacer(flex: 2),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 48),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
-                  _CircleButton(icon: Icons.mic_off, color: Colors.white24, onTap: () {}),
-                  _CircleButton(icon: Icons.call_end, color: Colors.red, size: 72, onTap: () {
-                    ref.read(callStateProvider.notifier).hangup();
-                    context.go('/dialer');
-                  }),
-                  _CircleButton(icon: Icons.volume_up, color: Colors.white24, onTap: () {}),
+                  _CircleButton(
+                      icon: _isMuted ? Icons.mic_off : Icons.mic,
+                      color: _isMuted ? Colors.red : Colors.white24,
+                      onTap: () {
+                        final activeCall = ref.read(callStateProvider);
+                        if (activeCall == null) return;
+                        setState(() {
+                          _isMuted = !_isMuted;
+                          if (_isMuted) {
+                            activeCall.webrtc.mute();
+                          } else {
+                            activeCall.webrtc.unmute();
+                          }
+                        });
+                      }),
+                  _CircleButton(
+                      icon: Icons.call_end,
+                      color: Colors.red,
+                      size: 72,
+                      onTap: () async {
+                        RingtoneService.stop();
+                        await ref.read(callStateProvider.notifier).hangup();
+                        if (mounted) context.go('/dialer');
+                      }),
+                  _CircleButton(
+                      icon: _isSpeakerOn ? Icons.volume_up : Icons.volume_off,
+                      color: _isSpeakerOn ? Colors.white24 : Colors.red,
+                      onTap: () {
+                        final activeCall = ref.read(callStateProvider);
+                        if (activeCall == null) return;
+                        setState(() => _isSpeakerOn = !_isSpeakerOn);
+                        activeCall.webrtc.toggleSpeaker();
+                      }),
                 ],
               ),
             ),
@@ -62,13 +255,15 @@ class _CallScreenState extends ConsumerState<CallScreen> {
     );
   }
 
-  String _statusText(CallStatus? status) => switch (status) {
-    CallStatus.ringing => 'Ringing...',
-    CallStatus.connecting => 'Connecting...',
-    CallStatus.connected => 'Connected (E2E Encrypted)',
-    CallStatus.ended => 'Call Ended',
-    _ => '',
-  };
+  String _statusText(CallStatus? status, bool isE2eeReady) => switch (status) {
+        CallStatus.ringing => 'Ringing...',
+        CallStatus.connecting => 'Connecting...',
+        CallStatus.connected => isE2eeReady
+            ? 'Connected (E2E Encrypted)'
+            : 'Connected (Transport Encrypted)',
+        CallStatus.ended => 'Call Ended',
+        _ => '',
+      };
 }
 
 class _CircleButton extends StatelessWidget {
@@ -76,13 +271,21 @@ class _CircleButton extends StatelessWidget {
   final Color color;
   final double size;
   final VoidCallback onTap;
-  const _CircleButton({required this.icon, required this.color, required this.onTap, this.size = 56});
+  const _CircleButton(
+      {required this.icon,
+      required this.color,
+      required this.onTap,
+      this.size = 56});
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(width: size, height: size, decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Icon(icon, color: Colors.white, size: size * 0.5)),
+      child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          child: Icon(icon, color: Colors.white, size: size * 0.5)),
     );
   }
 }
@@ -100,8 +303,12 @@ class _NetworkQualityBadge extends StatelessWidget {
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      decoration: BoxDecoration(color: color.withOpacity(0.2), borderRadius: BorderRadius.circular(12)),
-      child: Text(label, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600)),
+      decoration: BoxDecoration(
+          color: color.withOpacity(0.2),
+          borderRadius: BorderRadius.circular(12)),
+      child: Text(label,
+          style: TextStyle(
+              color: color, fontSize: 12, fontWeight: FontWeight.w600)),
     );
   }
 }
