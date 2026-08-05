@@ -19,6 +19,7 @@ build/
 # Go
 **/server/tmp/
 **/server/vendor/
+apps/server/server
 
 # IDE
 .idea/
@@ -39,3 +40,6 @@ Thumbs.db
 # Temp
 tmp/
 /tmp/
+
+# Local debug traces
+.dbg/
