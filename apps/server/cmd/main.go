@@ -62,6 +62,8 @@ func main() {
 		r.Post("/keys/prekeys", api.AuthMiddleware(keysHandler.UploadPreKeys))
 		r.Get("/keys/prekeys/{userID}", api.AuthMiddleware(keysHandler.GetPreKeys))
 		r.Post("/keys/signed-prekey", api.AuthMiddleware(keysHandler.UploadSignedPreKey))
+		r.Get("/users/by-phone/{phoneHash}", api.AuthMiddleware(authHandler.LookupByPhoneHash))
+		r.Get("/users/{userID}", api.AuthMiddleware(authHandler.LookupByUserId))
 		r.Post("/contacts/discover", api.AuthMiddleware(contactDiscovery.Discover))
 	})
 

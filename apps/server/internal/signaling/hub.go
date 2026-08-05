@@ -10,10 +10,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	wsWriteWait    = 10 * time.Second
+	wsPongWait     = 45 * time.Second
+	wsPingInterval = (wsPongWait * 9) / 10 // send pings at 90% of pong timeout
+)
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true },
+	HandshakeTimeout: 10 * time.Second,
 }
 
 type Client struct {
@@ -68,17 +75,29 @@ func (h *Hub) Run() {
 	}
 }
 
-func (h *Hub) sendToUser(userID string, message []byte) {
+func (h *Hub) _sendToUser(userID string, message []byte) {
+	// Hold the lock across the lookup AND the send: Run() removes a client and
+	// closes client.send under the same lock when it unregisters, so this keeps
+	// the send from racing a close. The select's default keeps it non-blocking
+	// when the buffer is full.
 	h.mu.RLock()
 	client, ok := h.clients[userID]
-	h.mu.RUnlock()
-	if ok {
-		select {
-		case client.send <- message:
-			h.TotalMessages++
-		default:
-		}
+	if !ok {
+		h.mu.RUnlock()
+		log.Printf("[SIGNAL] drop: target %s not connected", userID)
+		return
 	}
+	defer h.mu.RUnlock()
+	select {
+	case client.send <- message:
+		h.TotalMessages++
+	default:
+		log.Printf("[SIGNAL] drop: target %s send buffer full", userID)
+	}
+}
+
+func sendToUser(hub *Hub, userID string, message []byte) {
+	hub._sendToUser(userID, message)
 }
 
 func HandleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
@@ -88,6 +107,13 @@ func HandleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		log.Printf("websocket upgrade error: %v", err)
 		return
 	}
+	// Set initial read deadline.  The pong handler extends it on each pong.
+	conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		return nil
+	})
+
 	client := &Client{
 		hub:       hub,
 		conn:      conn,
@@ -110,14 +136,22 @@ func (c *Client) readPump() {
 		if err != nil {
 			break
 		}
+		// Each read extends the deadline — signals the client is alive.
+		c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+
 		var signal map[string]interface{}
 		if err := json.Unmarshal(message, &signal); err != nil {
 			continue
 		}
+		typ := signal["type"]
+		callID := signal["call_id"]
+		toUserID := signal["to_user_id"]
+		fromUserID := signal["from_user_id"]
+
 		c.hub.callMu.Lock()
-		if typ, ok := signal["type"].(string); ok {
-			if cid, ok2 := signal["call_id"].(string); ok2 {
-				switch typ {
+		if s, ok := typ.(string); ok {
+			if cid, ok2 := callID.(string); ok2 {
+				switch s {
 				case "offer", "answer":
 					c.hub.ActiveCallIDs[cid] = true
 				case "hangup":
@@ -128,17 +162,42 @@ func (c *Client) readPump() {
 		}
 		c.hub.CallsActive = len(c.hub.ActiveCallIDs)
 		c.hub.callMu.Unlock()
-		if toUserID, ok := signal["to_user_id"].(string); ok {
-			c.hub.sendToUser(toUserID, message)
+
+		log.Printf("[SIGNAL] recv type=%v call=%v from=%v to=%v", typ, callID, fromUserID, toUserID)
+
+		if toID, ok := toUserID.(string); ok && toID != "" {
+			sendToUser(c.hub, toID, message)
 		}
 	}
 }
 
 func (c *Client) writePump() {
-	defer c.conn.Close()
-	for message := range c.send {
-		if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-			break
+	ticker := time.NewTicker(wsPingInterval)
+	defer func() {
+		ticker.Stop()
+		// Ensure the client is removed from the hub even if the read pump hasn't
+		// noticed the failure yet (e.g. a half-open TCP connection whose reads
+		// never error). Run() guards against double-removal.
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+	for {
+		select {
+		case message, ok := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			if !ok {
+				// The hub closed the channel.
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return
+			}
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }

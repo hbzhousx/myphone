@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/myphone/server/internal/models"
 	"golang.org/x/crypto/bcrypt"
@@ -19,6 +21,12 @@ var jwtSecret = []byte("myphone-jwt-secret-change-in-production")
 func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
+		if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+			// Fallback: WebSocket connections pass token as query parameter.
+			if q := r.URL.Query().Get("token"); q != "" {
+				auth = "Bearer " + q
+			}
+		}
 		if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -47,6 +55,7 @@ type RegisterRequest struct {
 	PhoneNumber       string `json:"phone_number"`
 	Password          string `json:"password"`
 	IdentityPublicKey string `json:"identity_public_key"`
+	DisplayName       string `json:"display_name"`
 }
 
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
@@ -61,9 +70,15 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	passwordHash, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	userID := generateID()
+	// Store the plaintext phone number as the display name so callers/callees
+	// can show a readable number instead of a phone-hash or UUID.
+	displayName := req.DisplayName
+	if displayName == "" {
+		displayName = req.PhoneNumber
+	}
 	_, err := h.db.Exec(
-		`INSERT INTO users (id, phone_hash, identity_public_key, password_hash) VALUES ($1,$2,$3,$4)`,
-		userID, hashPhone(req.PhoneNumber), req.IdentityPublicKey, string(passwordHash),
+		`INSERT INTO users (id, phone_hash, identity_public_key, password_hash, display_name) VALUES ($1,$2,$3,$4,$5)`,
+		userID, hashPhone(req.PhoneNumber), req.IdentityPublicKey, string(passwordHash), displayName,
 	)
 	if err != nil {
 		http.Error(w, `{"error":"user already exists"}`, http.StatusConflict)
@@ -81,6 +96,7 @@ type LoginRequest struct {
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req LoginRequest
 	json.NewDecoder(r.Body).Decode(&req)
+	log.Printf("[AUTH] Login phone=%q hash=%s", req.PhoneNumber, hashPhone(req.PhoneNumber))
 	phoneHash := hashPhone(req.PhoneNumber)
 	var userID, passwordHash string
 	err := h.db.QueryRow(`SELECT id, password_hash FROM users WHERE phone_hash = $1`, phoneHash).Scan(&userID, &passwordHash)
@@ -96,6 +112,30 @@ func generateJWT(userID string) string {
 	claims := jwt.MapClaims{"sub": userID, "iat": time.Now().Unix(), "exp": time.Now().Add(30 * 24 * time.Hour).Unix()}
 	token, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)
 	return token
+}
+
+func (h *AuthHandler) LookupByUserId(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "userID")
+	var phoneHash, displayName string
+	err := h.db.QueryRow(`SELECT phone_hash, display_name FROM users WHERE id = $1`, userID).Scan(&phoneHash, &displayName)
+	if err != nil {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{
+		"user_id": userID, "phone_hash": phoneHash, "display_name": displayName,
+	})
+}
+
+func (h *AuthHandler) LookupByPhoneHash(w http.ResponseWriter, r *http.Request) {
+	phoneHash := chi.URLParam(r, "phoneHash")
+	var userID string
+	err := h.db.QueryRow(`SELECT id FROM users WHERE phone_hash = $1`, phoneHash).Scan(&userID)
+	if err != nil {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"user_id": userID})
 }
 
 func hashPhone(phone string) string {
