@@ -2,6 +2,7 @@
 /// Built on flutter_webrtc.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 
 enum NetworkTier { good, moderate, poor }
@@ -48,21 +49,48 @@ class WebrtcManager {
   rtc.RTCPeerConnection? _peerConnection;
   rtc.MediaStream? _localStream;
   final Map<String, dynamic> _iceServers;
+  rtc.MediaStream? _remoteStream;
+
+  Function(rtc.RTCIceCandidate candidate)? onIceCandidate;
+  Function(rtc.RTCPeerConnectionState state)? onConnectionState;
+  Function(rtc.RTCTrackEvent event)? onTrack;
 
   WebrtcManager({
     List<Map<String, String>> iceServers = const [
       {'urls': 'stun:stun.l.google.com:19302'},
+      {'urls': 'stun:stun1.l.google.com:19302'},
+      {
+        'urls': 'turn:openrelay.metered.ca:80',
+        'username': 'openrelayproject',
+        'credential': 'openrelayproject',
+      },
     ],
-  }) : _iceServers = {'iceServers': iceServers};
+  }) : _iceServers = {
+          'iceServers': iceServers,
+          'sdpSemantics': 'unified-plan',
+          'encodedInsertableStreams': true,
+        };
 
   rtc.RTCPeerConnection? get peerConnection => _peerConnection;
   rtc.MediaStream? get localStream => _localStream;
+  rtc.MediaStream? get remoteStream => _remoteStream;
 
   Future<void> initialize() async {
-    _localStream = await rtc.navigator.mediaDevices.getUserMedia({
-      'audio': true,
-      'video': false,
-    });
+    try {
+      _localStream = await rtc.navigator.mediaDevices
+          .getUserMedia({
+            'audio': {
+              'echoCancellation': true,
+              'noiseSuppression': true,
+              'autoGainControl': true,
+            },
+            'video': false,
+          })
+          .timeout(const Duration(seconds: 10));
+    } catch (e) {
+      debugPrint('[WEBRTC] getUserMedia failed: $e');
+      rethrow;
+    }
 
     _peerConnection = await rtc.createPeerConnection(_iceServers);
 
@@ -70,7 +98,28 @@ class WebrtcManager {
       _peerConnection!.addTrack(track, _localStream!);
     });
 
-    _peerConnection!.onTrack = (_) {};
+    _peerConnection!.onIceCandidate = (candidate) {
+      if (candidate.candidate == null) {
+        return;
+      }
+      onIceCandidate?.call(candidate);
+    };
+    _peerConnection!.onConnectionState = (state) {
+      debugPrint('[WEBRTC] connectionState: ${state.name}');
+      onConnectionState?.call(state);
+    };
+    _peerConnection!.onIceConnectionState = (state) {
+      debugPrint('[WEBRTC] iceConnectionState: ${state.name}');
+    };
+    _peerConnection!.onIceGatheringState = (state) {
+      debugPrint('[WEBRTC] iceGatheringState: ${state.name}');
+    };
+    _peerConnection!.onTrack = (event) {
+      if (event.streams.isNotEmpty) {
+        _remoteStream = event.streams.first;
+      }
+      onTrack?.call(event);
+    };
   }
 
   Future<String> createOffer() async {
@@ -78,11 +127,8 @@ class WebrtcManager {
       'offerToReceiveAudio': true,
       'offerToReceiveVideo': false,
     });
-    final modifiedSdp = _configureOpusSdp(offer.sdp!, NetworkTier.moderate);
-    await _peerConnection!.setLocalDescription(
-      rtc.RTCSessionDescription(offer.type, modifiedSdp),
-    );
-    return modifiedSdp;
+    await _peerConnection!.setLocalDescription(offer);
+    return offer.sdp!;
   }
 
   Future<String> createAnswer() async {
@@ -90,16 +136,13 @@ class WebrtcManager {
       'offerToReceiveAudio': true,
       'offerToReceiveVideo': false,
     });
-    final modifiedSdp = _configureOpusSdp(answer.sdp!, NetworkTier.moderate);
-    await _peerConnection!.setLocalDescription(
-      rtc.RTCSessionDescription(answer.type, modifiedSdp),
-    );
-    return modifiedSdp;
+    await _peerConnection!.setLocalDescription(answer);
+    return answer.sdp!;
   }
 
   Future<void> setRemoteDescription(String sdp, String type) async {
     await _peerConnection!.setRemoteDescription(
-      rtc.RTCSessionDescription(type, sdp),
+      rtc.RTCSessionDescription(sdp, type),
     );
   }
 
@@ -110,42 +153,92 @@ class WebrtcManager {
   }
 
   void adaptBitrate(NetworkTier tier) {
-    // Dynamically reconfigure Opus encoder via RTCRtpSender.setParameters
+    final config = OpusConfig.forTier(tier);
+    _applyOpusConfig(config);
   }
 
-  String _configureOpusSdp(String sdp, NetworkTier tier) {
-    final config = OpusConfig.forTier(tier);
-    final lines = sdp.split('\r\n');
-    final result = <String>[];
-    int? opusPayloadType;
+  Future<void> _applyOpusConfig(OpusConfig config) async {
+    final pc = _peerConnection;
+    if (pc == null) return;
 
-    for (final line in lines) {
-      if (line.startsWith('a=rtpmap:') && line.contains('opus/48000/2')) {
-        opusPayloadType = int.tryParse(line.substring(9, line.indexOf(' ')));
+    try {
+      final senders = await pc.getSenders();
+      for (final sender in senders) {
+        final track = sender.track;
+        if (track == null || track.kind != 'audio') continue;
+
+        try {
+          final parameters = sender.parameters;
+          final encodings = parameters.encodings;
+          if (encodings != null && encodings.isNotEmpty) {
+            // maxBitrate in kbps (flutter_webrtc convention)
+            encodings[0].maxBitrate = config.bitrateBps ~/ 1000;
+            await sender.setParameters(parameters);
+          }
+        } catch (e) {
+          debugPrint('adaptBitrate: setParameters failed for sender: $e');
+        }
       }
-      if (line.startsWith('a=rtpmap:') && line.contains('audio') && !line.contains('opus')) {
-        continue;
-      }
-      result.add(line);
+    } catch (e) {
+      debugPrint('adaptBitrate: getSenders failed: $e');
     }
+  }
 
-    if (opusPayloadType != null) {
-      result.add('a=fmtp:$opusPayloadType '
-          'minptime=10;'
-          'useinbandfec=${config.fec ? 1 : 0};'
-          'usedtx=${config.dtx ? 1 : 0};'
-          'maxaveragebitrate=${config.bitrateBps};'
-          'stereo=0;'
-          'sprop-stereo=0');
+  // --- Mute ---
+
+  bool _isMuted = false;
+  bool get isMuted => _isMuted;
+
+  void mute() {
+    if (_isMuted) return;
+    _isMuted = true;
+    final audioTracks = _localStream?.getAudioTracks() ?? [];
+    for (final track in audioTracks) {
+      track.enabled = false;
     }
+  }
 
-    return result.join('\r\n');
+  void unmute() {
+    if (!_isMuted) return;
+    _isMuted = false;
+    final audioTracks = _localStream?.getAudioTracks() ?? [];
+    for (final track in audioTracks) {
+      track.enabled = true;
+    }
+  }
+
+  void toggleMute() {
+    if (_isMuted) {
+      unmute();
+    } else {
+      mute();
+    }
+  }
+
+  // --- Speaker ---
+
+  bool _speakerOn = false;
+  bool get isSpeakerOn => _speakerOn;
+
+  Future<void> setSpeakerOn(bool on) async {
+    try {
+      await rtc.Helper.setSpeakerphoneOn(on);
+      _speakerOn = on;
+    } catch (e) {
+      // Graceful degradation — not all platforms support speaker toggle
+    }
+  }
+
+  Future<void> toggleSpeaker() async {
+    await setSpeakerOn(!_speakerOn);
   }
 
   Future<void> hangup() async {
     _localStream?.getTracks().forEach((track) => track.stop());
+    _remoteStream?.getTracks().forEach((track) => track.stop());
     await _peerConnection?.close();
     _peerConnection = null;
     _localStream = null;
+    _remoteStream = null;
   }
 }

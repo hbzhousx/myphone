@@ -5,13 +5,19 @@ library;
 
 import 'dart:typed_data';
 import 'dart:convert' as dart_convert;
+import 'dart:math';
 import 'package:convert/convert.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:crypto/crypto.dart' as crypto;
 
 class CryptoManager {
+  static final Random _random = Random.secure();
+
   static Future<SimpleKeyPair> generateIdentityKeyPair() =>
       X25519().newKeyPair();
+
+  static Future<SimpleKeyPair> generateSigningKeyPair() =>
+      Ed25519().newKeyPair();
 
   static Future<List<SimpleKeyPair>> generatePreKeys(int count) async {
     final pairs = <SimpleKeyPair>[];
@@ -144,11 +150,16 @@ class CryptoManager {
   }
 
   /// HKDF-SHA256 derive.
-  static Future<Uint8List> _hkdf(List<int> ikm, String info, int len) async {
+  static Future<Uint8List> _hkdf(
+    List<int> ikm,
+    String info,
+    int len, {
+    List<int>? nonce,
+  }) async {
     final hkdf = Hkdf(hmac: Hmac(Sha256()), outputLength: len);
     final sk = await hkdf.deriveKey(
       secretKey: SecretKey(ikm),
-      nonce: List<int>.filled(32, 0),
+      nonce: nonce ?? List<int>.filled(32, 0),
       info: dart_convert.utf8.encode(info),
     );
     return Uint8List.fromList(sk.bytes);
@@ -174,6 +185,192 @@ class CryptoManager {
 
   static SimplePublicKey keyFromHex(String h) =>
       SimplePublicKey(Uint8List.fromList(hex.decode(h)), type: KeyPairType.x25519);
+
+  static Future<SimplePublicKey> signingKeyFromHex(String h) async =>
+      SimplePublicKey(
+        Uint8List.fromList(hex.decode(h)),
+        type: KeyPairType.ed25519,
+      );
+
+  static Future<Uint8List> signBytes(
+    List<int> payload,
+    SimpleKeyPair signingKey,
+  ) async {
+    final signature = await Ed25519().sign(payload, keyPair: signingKey);
+    return Uint8List.fromList(signature.bytes);
+  }
+
+  static Future<bool> verifySignature({
+    required List<int> payload,
+    required List<int> signature,
+    required SimplePublicKey signingPublicKey,
+  }) {
+    return Ed25519().verify(
+      payload,
+      signature: Signature(
+        Uint8List.fromList(signature),
+        publicKey: signingPublicKey,
+      ),
+    );
+  }
+
+  static Uint8List randomBytes(int length) =>
+      Uint8List.fromList(List<int>.generate(length, (_) => _random.nextInt(256)));
+
+  static String randomNonce({int length = 16}) =>
+      hex.encode(randomBytes(length));
+
+  static String sha256Hex(List<int> payload) =>
+      crypto.sha256.convert(payload).toString();
+
+  static String canonicalJson(Map<String, dynamic> data) {
+    final normalized = _normalizeValue(data);
+    return dart_convert.jsonEncode(normalized);
+  }
+
+  static String handshakeDigest(Map<String, dynamic> envelope) =>
+      sha256Hex(dart_convert.utf8.encode(canonicalJson(envelope)));
+
+  static Future<StoredKeyPair> exportKeyPair(
+    SimpleKeyPair keyPair,
+  ) async {
+    final extracted = await keyPair.extract();
+    return StoredKeyPair(
+      privateKey: Uint8List.fromList(await extracted.extractPrivateKeyBytes()),
+      publicKey: Uint8List.fromList(extracted.publicKey.bytes),
+      type: extracted.type,
+    );
+  }
+
+  static SimpleKeyPairData restoreX25519KeyPair({
+    required List<int> privateKey,
+    required List<int> publicKey,
+  }) {
+    return SimpleKeyPairData(
+      Uint8List.fromList(privateKey),
+      publicKey: SimplePublicKey(
+        Uint8List.fromList(publicKey),
+        type: KeyPairType.x25519,
+      ),
+      type: KeyPairType.x25519,
+    );
+  }
+
+  static SimpleKeyPairData restoreEd25519KeyPair({
+    required List<int> privateKey,
+    required List<int> publicKey,
+  }) {
+    return SimpleKeyPairData(
+      Uint8List.fromList(privateKey),
+      publicKey: SimplePublicKey(
+        Uint8List.fromList(publicKey),
+        type: KeyPairType.ed25519,
+      ),
+      type: KeyPairType.ed25519,
+    );
+  }
+
+  static Future<CallSecrets> deriveCallSecrets({
+    required bool localIsOfferer,
+    required SimpleKeyPair localIdentityKey,
+    required SimpleKeyPair localEphemeralKey,
+    required SimplePublicKey remoteIdentityKey,
+    required SimplePublicKey remoteEphemeralKey,
+    required String callId,
+    required List<int> callSalt,
+  }) async {
+    final x = X25519();
+
+    Future<List<int>> dh(SimpleKeyPair ours, SimplePublicKey theirs) async {
+      final shared = await x.sharedSecretKey(
+        keyPair: ours,
+        remotePublicKey: theirs,
+      );
+      return shared.extractBytes();
+    }
+
+    final orderedSecrets = localIsOfferer
+        ? <List<int>>[
+            await dh(localIdentityKey, remoteEphemeralKey),
+            await dh(localEphemeralKey, remoteIdentityKey),
+            await dh(localEphemeralKey, remoteEphemeralKey),
+          ]
+        : <List<int>>[
+            await dh(localEphemeralKey, remoteIdentityKey),
+            await dh(localIdentityKey, remoteEphemeralKey),
+            await dh(localEphemeralKey, remoteEphemeralKey),
+          ];
+
+    final ikm = _concat(orderedSecrets);
+    final hkdfOutput = await _hkdf(
+      ikm,
+      'MyPhone-CallSecrets-v1:$callId',
+      96,
+      nonce: callSalt,
+    );
+    return CallSecrets(
+      mediaKey: Uint8List.fromList(hkdfOutput.sublist(0, 32)),
+      controlKey: Uint8List.fromList(hkdfOutput.sublist(32, 64)),
+      ratchetSalt: Uint8List.fromList(hkdfOutput.sublist(64, 96)),
+    );
+  }
+
+  static Future<Uint8List> deriveRotatedMediaKey({
+    required Uint8List currentMediaKey,
+    required List<int> rotationSeed,
+    required String callId,
+    required int keyIndex,
+  }) {
+    final ikm = Uint8List(currentMediaKey.length + rotationSeed.length)
+      ..setRange(0, currentMediaKey.length, currentMediaKey)
+      ..setRange(
+        currentMediaKey.length,
+        currentMediaKey.length + rotationSeed.length,
+        rotationSeed,
+      );
+    return _hkdf(
+      ikm,
+      'MyPhone-FrameKeyRotation-v1:$callId:$keyIndex',
+      32,
+      nonce: rotationSeed,
+    );
+  }
+
+  static Future<Uint8List> hmacSha256(
+    List<int> payload,
+    List<int> key,
+  ) async {
+    final mac = await Hmac.sha256().calculateMac(
+      payload,
+      secretKey: SecretKey(key),
+    );
+    return Uint8List.fromList(mac.bytes);
+  }
+
+  static String fingerprintFromPublicKey(List<int> publicKey) {
+    final digest = crypto.sha256.convert(publicKey).bytes;
+    final shortHex = hex.encode(digest.sublist(0, 10)).toUpperCase();
+    return shortHex.replaceAllMapped(
+      RegExp(r'.{4}'),
+      (match) => '${match.group(0)}-',
+    ).replaceFirst(RegExp(r'-$'), '');
+  }
+
+  static Object? _normalizeValue(Object? value) {
+    if (value is Map<String, dynamic>) {
+      final sortedKeys = value.keys.toList()..sort();
+      return {
+        for (final key in sortedKeys) key: _normalizeValue(value[key]),
+      };
+    }
+    if (value is List) {
+      return value.map(_normalizeValue).toList();
+    }
+    if (value is Uint8List) {
+      return hex.encode(value);
+    }
+    return value;
+  }
 }
 
 /// Double Ratchet session.
@@ -212,4 +409,28 @@ class DecryptResult {
   final Uint8List plaintext;
   final RatchetSession session;
   const DecryptResult({required this.plaintext, required this.session});
+}
+
+class StoredKeyPair {
+  final Uint8List privateKey;
+  final Uint8List publicKey;
+  final KeyPairType type;
+
+  const StoredKeyPair({
+    required this.privateKey,
+    required this.publicKey,
+    required this.type,
+  });
+}
+
+class CallSecrets {
+  final Uint8List mediaKey;
+  final Uint8List controlKey;
+  final Uint8List ratchetSalt;
+
+  const CallSecrets({
+    required this.mediaKey,
+    required this.controlKey,
+    required this.ratchetSalt,
+  });
 }

@@ -6,7 +6,12 @@ import 'dart:math';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class KeyManager {
-  static const _storage = FlutterSecureStorage();
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(
+      encryptedSharedPreferences: true,
+      resetOnError: true,
+    ),
+  );
   static const _dbKeyName = 'sqlcipher_db_key';
 
   static Future<String> getOrCreateDbKey() async {

@@ -2,23 +2,28 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../features/auth/screens/login_screen.dart';
+import '../features/auth/screens/phone_login_screen.dart';
 import '../features/auth/screens/register_screen.dart';
 import '../features/calls/screens/call_screen.dart';
 import '../features/calls/screens/dialer_screen.dart';
+import '../features/calls/screens/incoming_call_screen.dart';
+import '../features/calls/screens/keypad_screen.dart';
 import '../features/contacts/screens/contacts_screen.dart';
 import '../features/contacts/screens/contact_detail_screen.dart';
+import '../features/settings/screens/settings_screen.dart';
 import 'auth_guard.dart';
 
-final _rootNavigatorKey = GlobalKey<NavigatorState>();
+final rootNavigatorKey = GlobalKey<NavigatorState>();
 
 final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
-    navigatorKey: _rootNavigatorKey,
+    navigatorKey: rootNavigatorKey,
     initialLocation: '/login',
     redirect: (context, state) async {
       final loggedIn = await AuthGuard.isLoggedIn();
       final isAuthRoute = state.matchedLocation == '/login' ||
-          state.matchedLocation == '/register';
+          state.matchedLocation == '/register' ||
+          state.matchedLocation == '/phone-login';
 
       if (!loggedIn && !isAuthRoute) return '/login';
       if (loggedIn && isAuthRoute) return '/dialer';
@@ -34,8 +39,26 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const RegisterScreen(),
       ),
       GoRoute(
+        path: '/phone-login',
+        builder: (context, state) => PhoneLoginScreen(
+          prefillPhone: state.extra as String?,
+        ),
+      ),
+      GoRoute(
         path: '/dialer',
         builder: (context, state) => const DialerScreen(),
+      ),
+      GoRoute(
+        path: '/keypad',
+        builder: (context, state) => const KeypadScreen(),
+      ),
+      GoRoute(
+        path: '/incoming-call',
+        builder: (context, state) => const IncomingCallScreen(),
+      ),
+      GoRoute(
+        path: '/settings',
+        builder: (context, state) => const SettingsScreen(),
       ),
       GoRoute(
         path: '/call/:contactId',

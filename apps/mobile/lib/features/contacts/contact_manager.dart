@@ -10,12 +10,14 @@ class ContactManager {
   final ApiClient _api;
   ContactManager(this._api);
 
+  // Must match server auth.hashPhone: SHA256("myphone-salt:" + phoneNumber)
+  static const _phoneSalt = 'myphone-salt:';
+
   Future<List<Contact>> discoverFromPhoneBook({
     required List<String> phoneNumbers,
-    String salt = '',
   }) async {
     final hashes = phoneNumbers
-        .map((num) => CryptoManager.sha256Hash(num, salt: salt))
+        .map((phoneNumber) => CryptoManager.sha256Hash(phoneNumber, salt: _phoneSalt))
         .toList();
     final matches = await _api.discoverContacts(hashes);
     final contacts = matches.map((m) => Contact.fromJson(m)).toList();
@@ -40,15 +42,26 @@ class ContactManager {
     required String displayName,
     required String phoneNumber,
     String? publicKeyFingerprint,
-    String salt = '',
   }) async {
-    final phoneHash = CryptoManager.sha256Hash(phoneNumber, salt: salt);
+    final phoneHash = CryptoManager.sha256Hash(phoneNumber, salt: _phoneSalt);
+    // Try to resolve the user UUID from the server.
+    String contactId = phoneHash;
+    bool isRegistered = false;
+    try {
+      final userId = await _api.lookupUserByPhoneHash(phoneHash);
+      if (userId != null) {
+        contactId = userId;
+        isRegistered = true;
+      }
+    } catch (_) {
+      // Offline or server unreachable — fall back to phone_hash as id.
+    }
     await DatabaseManager.instance.upsertContact({
-      'id': phoneHash,
+      'id': contactId,
       'display_name': displayName,
       'phone_hash': phoneHash,
       'public_key_fingerprint': publicKeyFingerprint,
-      'is_registered': 0,
+      'is_registered': isRegistered ? 1 : 0,
     });
   }
 

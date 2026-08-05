@@ -58,14 +58,14 @@ class NetworkMonitor {
       double jitterMs = 0;
       int count = 0;
 
-      stats.forEach((report) {
+      for (final report in stats) {
         if (report.type == 'inbound-rtp' && report.values['kind'] == 'audio') {
           rttMs += (report.values['roundTripTime'] as num? ?? 0).toDouble() * 1000;
           packetLoss += (report.values['packetsLost'] as num? ?? 0).toDouble();
           jitterMs += (report.values['jitter'] as num? ?? 0).toDouble() * 1000;
           count++;
         }
-      });
+      }
 
       if (count > 0) {
         rttMs /= count;

@@ -16,6 +16,7 @@ dependencies:
   json_annotation: ^4.8.1
   flutter_webrtc: ^0.10.4
   local_auth: ^2.1.8
+  flutter_ringtone_player: ^4.0.0+4
   flutter_secure_storage: ^9.0.0
   web_socket_channel: ^2.4.0
   http: ^1.2.0
@@ -28,6 +29,9 @@ dependencies:
   convert: ^3.1.1
   cryptography: ^2.7.0
   permission_handler: ^11.2.0
+  sqflite_sqlcipher:
+    path: third_party/sqflite_sqlcipher
+  sqlcipher_flutter_libs: ^0.6.8
 
 dev_dependencies:
   flutter_test:

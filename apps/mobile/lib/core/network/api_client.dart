@@ -24,6 +24,7 @@ class ApiClient {
 
   Future<Map<String, dynamic>> register({
     required String phoneNumber,
+    required String password,
     required String identityPublicKey,
   }) async {
     final response = await _client.post(
@@ -31,6 +32,7 @@ class ApiClient {
       headers: await _authHeaders(),
       body: jsonEncode({
         'phone_number': phoneNumber,
+        'password': password,
         'identity_public_key': identityPublicKey,
       }),
     );
@@ -78,6 +80,27 @@ class ApiClient {
     );
     final data = _handleResponse(response);
     return List<Map<String, dynamic>>.from(data['matches']);
+  }
+
+  // --- User Lookup ---
+
+  Future<String?> lookupUserByPhoneHash(String phoneHash) async {
+    final response = await _client.get(
+      Uri.parse('$_baseUrl/users/by-phone/$phoneHash'),
+      headers: await _authHeaders(),
+    );
+    if (response.statusCode == 404) return null;
+    final data = _handleResponse(response);
+    return data['user_id'] as String?;
+  }
+
+  Future<Map<String, dynamic>?> lookupUserById(String userId) async {
+    final response = await _client.get(
+      Uri.parse('$_baseUrl/users/$userId'),
+      headers: await _authHeaders(),
+    );
+    if (response.statusCode == 404) return null;
+    return _handleResponse(response);
   }
 
   Map<String, dynamic> _handleResponse(http.Response response) {

@@ -12,6 +12,7 @@ class LoginScreen extends ConsumerStatefulWidget {
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
   bool _biometricAvailable = false;
+  bool _hasStoredCredentials = false;
   bool _isLoading = true;
 
   @override
@@ -22,12 +23,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   Future<void> _checkBiometric() async {
     final availability = await BiometricAuth.checkAvailability();
+    final hasToken = await AuthGuard.isLoggedIn();
+    final biometricBound = await AuthGuard.isBiometricEnabled();
     if (mounted) {
       setState(() {
-        _biometricAvailable = availability.isAvailable && availability.isEnrolled;
+        _biometricAvailable = availability.isAvailable;
+        // Show the fingerprint button if we have a valid token, OR if the
+        // user previously bound a fingerprint (persisted across sign-out).
+        _hasStoredCredentials = hasToken || biometricBound;
         _isLoading = false;
       });
-      if (_biometricAvailable && await AuthGuard.isLoggedIn()) {
+      if (_biometricAvailable && hasToken) {
         _tryBiometricLogin();
       }
     }
@@ -35,8 +41,21 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   Future<void> _tryBiometricLogin() async {
     final result = await BiometricAuth.biometricLogin();
-    if (mounted && result.isSuccess) {
-      context.go('/dialer');
+    if (!mounted) return;
+    if (result.isSuccess) {
+      final hasToken = await AuthGuard.isLoggedIn();
+      if (hasToken) {
+        context.go('/dialer');
+      } else {
+        // Token was cleared (signed out) but fingerprint is bound —
+        // route to password login prefilled with the saved phone number.
+        final savedPhone = await AuthGuard.getSavedPhone();
+        context.go('/phone-login', extra: savedPhone);
+      }
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result.message ?? 'Biometric authentication failed')),
+      );
     }
   }
 
@@ -61,7 +80,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               const SizedBox(height: 8),
               Text('Encrypted calls, anywhere.', style: theme.textTheme.bodyLarge?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
               const SizedBox(height: 64),
-              if (_biometricAvailable) ...[
+              if (_biometricAvailable && _hasStoredCredentials) ...[
                 SizedBox(
                   width: 80, height: 80,
                   child: ElevatedButton(
@@ -77,8 +96,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton(
-                  onPressed: () => context.go('/register'),
-                  child: const Text('Login with Phone Number'),
+                  onPressed: () => context.go('/phone-login'),
+                  child: const Text('Sign In with Phone'),
                 ),
               ),
             ],
