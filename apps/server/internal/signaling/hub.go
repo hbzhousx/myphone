@@ -100,6 +100,49 @@ func sendToUser(hub *Hub, userID string, message []byte) {
 	hub._sendToUser(userID, message)
 }
 
+// IsOnline returns true for each userID that currently has a live WebSocket
+// connection.  Presence is derived from the hub's clients map, so it reflects
+// "the app is running with an active signaling connection".
+func (h *Hub) IsOnline(userIDs []string) map[string]bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	result := make(map[string]bool, len(userIDs))
+	for _, id := range userIDs {
+		_, ok := h.clients[id]
+		result[id] = ok
+	}
+	return result
+}
+
+// HandlePresence answers POST /v1/users/presence.
+// Request:  {"user_ids": ["<uuid>", ...]}
+// Response: {"presence": {"<uuid>": "online"|"offline", ...}}
+func HandlePresence(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserIDs []string `json:"user_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if len(req.UserIDs) == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"presence": map[string]string{},
+		})
+		return
+	}
+	online := hub.IsOnline(req.UserIDs)
+	presence := make(map[string]string, len(online))
+	for id, isOnline := range online {
+		if isOnline {
+			presence[id] = "online"
+		} else {
+			presence[id] = "offline"
+		}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"presence": presence})
+}
+
 func HandleWebSocket(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value("userID").(string)
 	conn, err := upgrader.Upgrade(w, r, nil)

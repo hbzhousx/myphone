@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -24,6 +26,8 @@ class _ContactsScreenState extends ConsumerState<ContactsScreen> {
 
   Future<void> _loadContacts() async {
     final rows = await DatabaseManager.instance.getContacts();
+    // Refresh online/offline presence in the background after loading.
+    unawaited(ref.read(contactPresenceProvider.notifier).refresh());
     if (mounted) {
       setState(() {
         _contacts = rows.map((r) => Contact.fromJson(r)).toList();
@@ -119,23 +123,33 @@ class _ContactsScreenState extends ConsumerState<ContactsScreen> {
           ? const Center(child: CircularProgressIndicator())
           : _contacts.isEmpty
               ? const Center(child: Text('No contacts yet'))
-              : ListView.builder(
-                  itemCount: _contacts.length,
-                  itemBuilder: (context, index) {
-                    final contact = _contacts[index];
-                    return ListTile(
-                      leading: CircleAvatar(child: Text(contact.initials)),
-                      title: Text(contact.displayName),
-                      subtitle: contact.isRegistered
-                          ? const Text('MyPhone User', style: TextStyle(color: Colors.green))
-                          : null,
-                      trailing: contact.isRegistered
-                          ? const Icon(Icons.call, color: Colors.green)
-                          : const Icon(Icons.person_add, color: Colors.grey),
-                      onTap: () => context.push('/contacts/${contact.id}'),
-                    );
-                  },
-                ),
+              : Consumer(builder: (context, ref, _) {
+                  final presence = ref.watch(contactPresenceProvider);
+                  return ListView.builder(
+                    itemCount: _contacts.length,
+                    itemBuilder: (context, index) {
+                      final contact = _contacts[index];
+                      final isOnline = presence[contact.id] ?? false;
+                      return ListTile(
+                        leading: CircleAvatar(child: Text(contact.initials)),
+                        title: Text(contact.displayName),
+                        subtitle: contact.isRegistered
+                            ? Text(
+                                isOnline ? 'Online' : 'Offline',
+                                style: TextStyle(
+                                  color: isOnline ? Colors.green : Colors.grey,
+                                  fontSize: 12,
+                                ),
+                              )
+                            : null,
+                        trailing: contact.isRegistered
+                            ? const Icon(Icons.call, color: Colors.green)
+                            : const Icon(Icons.person_add, color: Colors.grey),
+                        onTap: () => context.push('/contacts/${contact.id}'),
+                      );
+                    },
+                  );
+                }),
     );
   }
 }

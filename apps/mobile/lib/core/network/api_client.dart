@@ -94,6 +94,21 @@ class ApiClient {
     return data['user_id'] as String?;
   }
 
+  /// Batch online/offline presence for a list of user IDs.
+  /// Returns a map of userID → true (online) / false (offline).
+  Future<Map<String, bool>> fetchPresence(List<String> userIds) async {
+    final response = await _client.post(
+      Uri.parse('$_baseUrl/users/presence'),
+      headers: await _authHeaders(),
+      body: jsonEncode({'user_ids': userIds}),
+    );
+    final data = _handleResponse(response);
+    final presence = (data['presence'] as Map<String, dynamic>?) ?? {};
+    return presence.map(
+      (id, v) => MapEntry(id, v == 'online'),
+    );
+  }
+
   Future<Map<String, dynamic>?> lookupUserById(String userId) async {
     final response = await _client.get(
       Uri.parse('$_baseUrl/users/$userId'),

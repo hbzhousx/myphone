@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/storage/database.dart';
+import '../../contacts/contact_manager.dart';
 import '../call_state.dart';
 
 class DialerScreen extends ConsumerStatefulWidget {
@@ -18,6 +21,9 @@ class _DialerScreenState extends ConsumerState<DialerScreen> with WidgetsBinding
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // All login paths land on /dialer — warm contact presence in the
+    // background so the contacts list shows fresh statuses on first open.
+    unawaited(ref.read(contactPresenceProvider.notifier).refresh());
   }
 
   @override

@@ -1,6 +1,8 @@
 /// Contact management — local storage, phone hash discovery, sync.
 library;
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../../core/storage/database.dart';
 import '../../core/crypto/crypto_manager.dart';
 import '../../core/network/api_client.dart';
@@ -69,4 +71,40 @@ class ContactManager {
     final db = await DatabaseManager.instance.database;
     await db.delete('contacts', where: 'id = ?', whereArgs: [id]);
   }
+
+  static final _uuidRe = RegExp(r'^[0-9a-f]{32}$');
+
+  /// Fetch online/offline presence for registered contacts.
+  /// Only contacts whose id is a server UUID can be online; phone-hash ids
+  /// are local-only and skipped.
+  Future<Map<String, bool>> refreshPresence(List<Contact> contacts) async {
+    final userIds = contacts
+        .where((c) => c.isRegistered && _uuidRe.hasMatch(c.id))
+        .map((c) => c.id)
+        .toList();
+    if (userIds.isEmpty) return {};
+    return _api.fetchPresence(userIds).timeout(const Duration(seconds: 5));
+  }
 }
+
+/// In-memory online/offline presence for contacts, keyed by contact user ID.
+/// Presence is transient (WebSocket-derived) and deliberately not persisted.
+class ContactPresenceNotifier extends StateNotifier<Map<String, bool>> {
+  ContactPresenceNotifier() : super(const {});
+
+  Future<void> refresh() async {
+    try {
+      final rows = await DatabaseManager.instance.getContacts();
+      final contacts = rows.map((r) => Contact.fromJson(r)).toList();
+      final manager = ContactManager(ApiClient());
+      final presence = await manager.refreshPresence(contacts);
+      state = {...state, ...presence};
+    } catch (_) {
+      // Keep the last known presence on failure (offline / slow server).
+    }
+  }
+}
+
+final contactPresenceProvider =
+    StateNotifierProvider<ContactPresenceNotifier, Map<String, bool>>(
+        (ref) => ContactPresenceNotifier());
