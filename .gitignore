@@ -41,5 +41,9 @@ Thumbs.db
 tmp/
 /tmp/
 
+# Deploy artifacts (server binary)
+deploy/artifacts/
+
 # Local debug traces
 .dbg/
+__pycache__/

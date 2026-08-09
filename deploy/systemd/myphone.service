@@ -1,0 +1,25 @@
+# MyPhone 信令服务 systemd 单元
+# 由 deploy-server.sh 安装到 /etc/systemd/system/myphone.service
+[Unit]
+Description=MyPhone signaling server
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service redis-server.service
+
+[Service]
+Type=simple
+User=myphone
+Group=myphone
+EnvironmentFile=/etc/myphone/myphone.env
+ExecStart=/opt/myphone/myphone-server
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

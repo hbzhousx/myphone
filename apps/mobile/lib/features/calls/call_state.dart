@@ -223,6 +223,7 @@ class CallStateNotifier extends StateNotifier<ActiveCall?> {
     try {
       final offerHandshake = await call.e2ee.createOfferHandshake();
       final sdp = await call.webrtc.createOffer();
+      call.webrtc.log('send offer to $toUserId');
       _signaling.sendOffer(
         callId: callId,
         fromUserId: currentUserId,
@@ -261,6 +262,7 @@ class CallStateNotifier extends StateNotifier<ActiveCall?> {
       await call.webrtc.setRemoteDescription(sdpOffer, 'offer');
       final answerHandshake = await call.e2ee.createAnswerHandshake(e2eeOffer);
       final sdp = await call.webrtc.createAnswer();
+      call.webrtc.log('send answer to $contactId');
       _signaling.sendAnswer(
         callId: callId,
         fromUserId: currentUserId,
@@ -270,6 +272,7 @@ class CallStateNotifier extends StateNotifier<ActiveCall?> {
       );
       await _flushPendingIce(call);
     } catch (e) {
+      call.webrtc.log('acceptIncomingCall failed: $e');
       debugPrint('[CALL] acceptIncomingCall failed: $e');
       // Clean up so we don't stay stuck in a call state.
       try { await call.e2ee.dispose(); } catch (_) {}
@@ -450,6 +453,7 @@ class CallStateNotifier extends StateNotifier<ActiveCall?> {
         if (activeCall.status == CallStatus.ringing) {
           state = activeCall.copyWith(status: CallStatus.connecting);
         }
+        activeCall.webrtc.log('recv answer, setRemoteDescription');
         await activeCall.webrtc.setRemoteDescription(
           payload['sdp'] as String,
           'answer',
@@ -458,7 +462,9 @@ class CallStateNotifier extends StateNotifier<ActiveCall?> {
         if (e2eeAnswer is Map<String, dynamic>) {
           try {
             await activeCall.e2ee.completeWithAnswer(e2eeAnswer);
+            activeCall.webrtc.log('E2EE answer complete');
           } catch (e) {
+            activeCall.webrtc.log('E2EE answer failed: $e');
             debugPrint('[CALL] e2ee answer failed: $e');
             // Abort the call cleanly — no silent one-way audio.
             await hangup();
@@ -482,6 +488,7 @@ class CallStateNotifier extends StateNotifier<ActiveCall?> {
           activeCall.pendingRemoteIce.add(candidate);
           return;
         }
+        activeCall.webrtc.log('recv remote ICE: ${CallDiagnostics.typeOf(payload['candidate'] as String)}');
         await _addIceCandidate(activeCall, candidate);
         break;
       case CallSignalType.e2eeRotate:
@@ -500,6 +507,7 @@ class CallStateNotifier extends StateNotifier<ActiveCall?> {
           }
           return;
         }
+        activeCall.webrtc.log('recv hangup');
         // Clear the state synchronously so an immediate new call sees no stale
         // call, then release resources in the background.
         _stopDurationTimer();

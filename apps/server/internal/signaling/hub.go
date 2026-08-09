@@ -65,7 +65,11 @@ func (h *Hub) Run() {
 			log.Printf("client connected: %s", client.userID)
 		case client := <-h.unregister:
 			h.mu.Lock()
-			if _, ok := h.clients[client.userID]; ok {
+			// Only remove THIS connection from the map.  A reconnect may have
+			// already replaced h.clients[userID] with a newer connection; blindly
+			// deleting by userID would evict the fresh connection and make the
+			// user appear offline to later signals ("drop: target not connected").
+			if h.clients[client.userID] == client {
 				delete(h.clients, client.userID)
 				close(client.send)
 			}

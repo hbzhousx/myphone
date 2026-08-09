@@ -2,8 +2,13 @@
 /// Built on flutter_webrtc.
 library;
 
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
 
 enum NetworkTier { good, moderate, poor }
 
@@ -45,6 +50,21 @@ class OpusConfig {
   }
 }
 
+/// 呼叫诊断信息，用于在 CallScreen 实时显示，帮助排查媒体建立问题。
+class CallDiagnostics {
+  String connectionState = 'idle'; // RTCPeerConnectionState
+  String iceConnectionState = 'new'; // RTCIceConnectionState
+  String iceGatheringState = 'new'; // RTCIceGatheringState
+  final List<String> localCandidates = []; // 本地候选，含类型 (host/srflx/relay)
+  final List<String> timeline = []; // 事件时间线（最多保留 ~20 条）
+
+  /// 从 RTCIceCandidate.candidate 字符串解析候选类型。
+  static String typeOf(String candidate) {
+    final m = RegExp(r'\btyp\s+(\w+)').firstMatch(candidate);
+    return m?.group(1) ?? 'unknown';
+  }
+}
+
 class WebrtcManager {
   rtc.RTCPeerConnection? _peerConnection;
   rtc.MediaStream? _localStream;
@@ -55,20 +75,92 @@ class WebrtcManager {
   Function(rtc.RTCPeerConnectionState state)? onConnectionState;
   Function(rtc.RTCTrackEvent event)? onTrack;
 
+  /// 诊断信息（独立于 Riverpod 状态流，供 CallScreen 实时监听）。
+  final ValueNotifier<CallDiagnostics> diagnostics = ValueNotifier(CallDiagnostics());
+
+  /// 追加一条诊断时间线事件。
+  void log(String event) {
+    final d = diagnostics.value;
+    d.timeline.add(event);
+    if (d.timeline.length > 20) {
+      d.timeline.removeRange(0, d.timeline.length - 20);
+    }
+    diagnostics.value = CallDiagnostics()
+      ..connectionState = d.connectionState
+      ..iceConnectionState = d.iceConnectionState
+      ..iceGatheringState = d.iceGatheringState
+      ..localCandidates.addAll(d.localCandidates)
+      ..timeline.addAll(d.timeline);
+    _appendToLogFile('${_timestamp()} $event');
+  }
+
+  static Future<String>? _logFilePath;
+  static Future<String> _resolveLogPath() async {
+    // 写入 USB/文件管理器可访问的目录：/storage/emulated/0/Android/data/com.myphone.app/files/
+    // （真机上通过 USB 连接即可看到；不要用 getApplicationDocumentsDirectory()——那是 App 私有目录，普通访问不到）
+    final dir = await getExternalStorageDirectory();
+    if (dir != null) {
+      return p.join(dir.path, 'Android', 'data', 'com.myphone.app', 'files', 'myphone_diag.log');
+    }
+    final appDir = await getApplicationDocumentsDirectory();
+    return p.join(appDir.path, 'myphone_diag.log');
+  }
+
+  static String _timestamp() {
+    final n = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${two(n.hour)}:${two(n.minute)}:${two(n.second)}.${(n.millisecond ~/ 100)}';
+  }
+
+  static void _appendToLogFile(String line) {
+    unawaited(() async {
+      try {
+        final path = await (_logFilePath ??= _resolveLogPath());
+        final f = File(path);
+        await f.parent.create(recursive: true);
+        await f.writeAsString('$line\n', mode: FileMode.append);
+      } catch (e) {
+        debugPrint('[WEBRTC] log file write failed: $e');
+      }
+    }());
+  }
+
+  /// 生产环境 ICE 服务器，通过 --dart-define 注入自建 STUN/TURN；
+  /// 未配置时回退到默认的 Google STUN + Metered TURN（仅适合开发联调）。
+  static const String _stunUrl = String.fromEnvironment(
+    'MYPHONE_STUN_URL',
+    defaultValue: 'stun:stun.l.google.com:19302',
+  );
+  static const String _turnUrl = String.fromEnvironment('MYPHONE_TURN_URL');
+  static const String _turnUsername = String.fromEnvironment('MYPHONE_TURN_USERNAME');
+  static const String _turnCredential = String.fromEnvironment('MYPHONE_TURN_CREDENTIAL');
+
+  /// 编译期决定的 ICE 服务器列表。
+  static const List<Map<String, String>> defaultIceServers = _turnUrl == ''
+      ? [
+          {'urls': 'stun:stun.l.google.com:19302'},
+          {'urls': 'stun:stun1.l.google.com:19302'},
+          {
+            'urls': 'turn:openrelay.metered.ca:80',
+            'username': 'openrelayproject',
+            'credential': 'openrelayproject',
+          },
+        ]
+      : [
+          {'urls': _stunUrl},
+          {'urls': _turnUrl, 'username': _turnUsername, 'credential': _turnCredential},
+        ];
+
   WebrtcManager({
-    List<Map<String, String>> iceServers = const [
-      {'urls': 'stun:stun.l.google.com:19302'},
-      {'urls': 'stun:stun1.l.google.com:19302'},
-      {
-        'urls': 'turn:openrelay.metered.ca:80',
-        'username': 'openrelayproject',
-        'credential': 'openrelayproject',
-      },
-    ],
+    List<Map<String, String>> iceServers = defaultIceServers,
   }) : _iceServers = {
           'iceServers': iceServers,
           'sdpSemantics': 'unified-plan',
           'encodedInsertableStreams': true,
+          // 强制只走 relay(TURN)：跨 NAT 场景 host/srflx 直连常不可达，
+          // 且手机网络可能限制 UDP。强制 relay 后媒体必走 TURN(经 TCP)，
+          // 这是 GitHub 成功实践(flutter-webrtc issue #1423/#1614)验证过的方案。
+          'iceTransportPolicy': 'relay',
         };
 
   rtc.RTCPeerConnection? get peerConnection => _peerConnection;
@@ -102,17 +194,31 @@ class WebrtcManager {
       if (candidate.candidate == null) {
         return;
       }
+      // 记录本地 ICE 候选类型（host/srflx/relay/prflx），供诊断面板显示。
+      final d = diagnostics.value;
+      final type = CallDiagnostics.typeOf(candidate.candidate!);
+      final label = '$type:${candidate.candidate}';
+      if (!d.localCandidates.contains(label) && d.localCandidates.length < 8) {
+        d.localCandidates.add(label);
+      }
+      log('local ICE: $type');
       onIceCandidate?.call(candidate);
     };
     _peerConnection!.onConnectionState = (state) {
       debugPrint('[WEBRTC] connectionState: ${state.name}');
+      diagnostics.value.connectionState = state.name;
+      log('peerConnection: ${state.name}');
       onConnectionState?.call(state);
     };
     _peerConnection!.onIceConnectionState = (state) {
       debugPrint('[WEBRTC] iceConnectionState: ${state.name}');
+      diagnostics.value.iceConnectionState = state.name;
+      log('iceConnection: ${state.name}');
     };
     _peerConnection!.onIceGatheringState = (state) {
       debugPrint('[WEBRTC] iceGatheringState: ${state.name}');
+      diagnostics.value.iceGatheringState = state.name;
+      log('iceGathering: ${state.name}');
     };
     _peerConnection!.onTrack = (event) {
       if (event.streams.isNotEmpty) {
