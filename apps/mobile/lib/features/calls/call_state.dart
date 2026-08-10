@@ -10,9 +10,11 @@ import 'package:uuid/uuid.dart';
 
 import '../../app/auth_guard.dart';
 import '../../core/network/api_client.dart';
+import '../../core/network/service_bridge.dart';
 import '../../core/network/signaling_client.dart';
 import '../../core/crypto/crypto_manager.dart';
 import '../../core/storage/database.dart';
+import '../../core/webrtc/ice_policy.dart';
 import '../../core/webrtc/network_monitor.dart';
 import '../../core/webrtc/webrtc_manager.dart';
 import 'call_e2ee_manager.dart';
@@ -328,7 +330,13 @@ class CallStateNotifier extends StateNotifier<ActiveCall?> {
     required bool isIncoming,
     required String currentUserId,
   }) async {
-    final webrtc = WebrtcManager();
+    // 自适应 ICE：预探测当前网络 UDP 出站是否可达。
+    // 可达 → p2p(ICE 先试直连，不通自动 fallback relay)；受限 → relay(经 TCP TURN)。
+    final icePolicy = await determineIcePolicy(
+      stunUrl: WebrtcManager.stunUrl,
+      turnUrl: WebrtcManager.turnUrl,
+    );
+    final webrtc = WebrtcManager(policy: icePolicy);
     await webrtc.initialize();
     final monitor = NetworkMonitor(webrtc);
 
@@ -693,7 +701,7 @@ class CallStateNotifier extends StateNotifier<ActiveCall?> {
 
 final callStateProvider = StateNotifierProvider<CallStateNotifier, ActiveCall?>(
   (ref) => CallStateNotifier(
-    SignalingClient(),
+    createSignalingClient(),
     onIncomingCall: (call) {
       ref.read(incomingCallProvider.notifier).setIncoming(call);
     },

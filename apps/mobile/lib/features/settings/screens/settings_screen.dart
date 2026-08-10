@@ -1,14 +1,189 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../../../app/auth_guard.dart';
+import '../../../core/network/service_bridge.dart';
+import '../../../core/ota/apk_installer.dart';
+import '../../../core/ota/ota_service.dart';
+import '../../auth/biometric_auth.dart';
 import '../settings_state.dart';
 
-class SettingsScreen extends ConsumerWidget {
+class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  final _ota = OtaService();
+  String _versionLabel = '…';
+  bool _checkingUpdate = false;
+  bool _biometricEnabled = false;
+  bool _biometricLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadVersion();
+    _loadBiometricState();
+  }
+
+  Future<void> _loadBiometricState() async {
+    final enabled = await AuthGuard.isBiometricEnabled();
+    if (mounted) {
+      setState(() {
+        _biometricEnabled = enabled;
+        _biometricLoading = false;
+      });
+    }
+  }
+
+  Future<void> _toggleBiometric(bool enable) async {
+    if (enable) {
+      // 开启前先确认设备支持 + 通过一次指纹验证。
+      final availability = await BiometricAuth.checkAvailability();
+      if (!availability.isAvailable || !availability.isEnrolled) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Biometric not available or not enrolled')));
+        }
+        return;
+      }
+      final result = await BiometricAuth.authenticate(
+          reason: 'Enable fingerprint unlock');
+      if (result != BiometricResult.success) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Fingerprint verification failed')));
+        }
+        return;
+      }
+      final savedPhone = await AuthGuard.getSavedPhone();
+      await AuthGuard.setBiometricEnabled(true, phone: savedPhone);
+    } else {
+      await AuthGuard.setBiometricEnabled(false);
+    }
+    if (mounted) setState(() => _biometricEnabled = enable);
+  }
+
+  Future<void> _loadVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (mounted) {
+        setState(() => _versionLabel = '${info.version} (build ${info.buildNumber})');
+      }
+    } catch (_) {}
+  }
+
+  /// 打开系统"电池优化/忽略电池优化"设置页（各 ROM 路径见白名单引导文案）。
+  Future<void> _openBatteryOptimizationSettings() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await const MethodChannel('myphone/system').invokeMethod(
+        'openSettings',
+        {'action': 'android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS'},
+      );
+    } catch (_) {
+      await const MethodChannel('myphone/system').invokeMethod(
+        'openSettings',
+        {'action': 'android.settings.SETTINGS'},
+      );
+    }
+  }
+
+  Future<void> _checkUpdate() async {
+    if (_checkingUpdate) return;
+    setState(() => _checkingUpdate = true);
+    try {
+      final update = await _ota.checkForUpdate();
+      if (!mounted) return;
+      if (update == null) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Already up to date')));
+        return;
+      }
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('Update available v${update.version}'),
+          content: Text(update.notes.isEmpty
+              ? 'Download and install?'
+              : '${update.notes}\n\nDownload and install?'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Download')),
+          ],
+        ),
+      );
+      if (confirm == true && mounted) {
+        // 下载进度对话框:用 ValueNotifier 持有进度,ValueListenableBuilder 自动刷新。
+        final progress = ValueNotifier<double?>(null);
+        // ignore: use_build_context_synchronously
+        showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Downloading update...'),
+            content: Row(
+              children: [
+                Expanded(
+                  child: ValueListenableBuilder<double?>(
+                    valueListenable: progress,
+                    builder: (context, v, child) =>
+                        LinearProgressIndicator(value: v),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                ValueListenableBuilder<double?>(
+                  valueListenable: progress,
+                  builder: (context, v, child) => Text(
+                    v == null ? '' : '${(v * 100).toStringAsFixed(0)}%',
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+        final path = await _ota.downloadApk(
+          onProgress: (r, t) {
+            progress.value = t > 0 ? r / t : null;
+          },
+        );
+        if (mounted) Navigator.of(context, rootNavigator: true).pop();
+        if (!mounted) return;
+        final installed = await ApkInstaller.installApk(path);
+        if (!installed && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Failed to open installer')));
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Update check failed: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _checkingUpdate = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ota.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
     final theme = Theme.of(context);
 
@@ -38,13 +213,55 @@ class SettingsScreen extends ConsumerWidget {
                 ref.read(settingsProvider.notifier).toggleNotifications(),
             secondary: const Icon(Icons.notifications),
           ),
+          SwitchListTile(
+            title: const Text('Fingerprint Unlock'),
+            subtitle: const Text('Sign in with your fingerprint'),
+            value: _biometricEnabled,
+            onChanged: _biometricLoading ? null : _toggleBiometric,
+            secondary: const Icon(Icons.fingerprint),
+          ),
+          if (Platform.isAndroid) ...[
+            SwitchListTile(
+              title: const Text('常驻后台（保持在线）'),
+              subtitle: const Text('退出 app 后仍保持登录，来电全屏唤醒'),
+              value: settings.residentEnabled,
+              onChanged: (v) async {
+                await ref
+                    .read(settingsProvider.notifier)
+                    .toggleResident();
+                await ResidentService.applyEnabled(v);
+              },
+              secondary: const Icon(Icons.power_settings_new),
+            ),
+            ListTile(
+              leading: const Icon(Icons.battery_saver),
+              title: const Text('加入电池白名单'),
+              subtitle: const Text('防止系统省电策略杀死常驻服务（小米/华为/OPPO 等）'),
+              onTap: _openBatteryOptimizationSettings,
+            ),
+          ],
+          const Divider(),
+
+          const _SectionHeader(title: 'Update'),
+          ListTile(
+            leading: const Icon(Icons.system_update),
+            title: const Text('Check for updates'),
+            subtitle: const Text('Download and install the latest version'),
+            trailing: _checkingUpdate
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : null,
+            onTap: _checkingUpdate ? null : _checkUpdate,
+          ),
           const Divider(),
 
           const _SectionHeader(title: 'About'),
-          const ListTile(
-            leading: Icon(Icons.info_outline),
-            title: Text('Version'),
-            subtitle: Text('1.0.0 (build 1)'),
+          ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('Version'),
+            subtitle: Text(_versionLabel),
           ),
           const ListTile(
             leading: Icon(Icons.security),
@@ -74,6 +291,8 @@ class SettingsScreen extends ConsumerWidget {
                   ),
                 );
                 if (confirm == true && context.mounted) {
+                  // v0.4: 先停常驻服务（断 WS 离线），再清 token。
+                  await ResidentService.logout();
                   await AuthGuard.clearToken();
                   context.go('/login');
                 }

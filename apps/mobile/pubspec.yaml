@@ -1,7 +1,7 @@
 name: myphone
 description: Encrypted calling app with low-bandwidth support.
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.6+6
 
 environment:
   sdk: '>=3.2.0 <4.0.0'
@@ -17,6 +17,8 @@ dependencies:
   flutter_webrtc: ^0.10.4
   local_auth: ^2.1.8
   flutter_ringtone_player: ^4.0.0+4
+  audioplayers: ^6.0.0
+  package_info_plus: ^8.0.0
   flutter_secure_storage: ^9.0.0
   web_socket_channel: ^2.4.0
   http: ^1.2.0
@@ -47,3 +49,4 @@ flutter:
   assets:
     - assets/images/
     - assets/sounds/
+    - assets/sounds/dtmf/

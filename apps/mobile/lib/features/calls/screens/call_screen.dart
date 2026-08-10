@@ -6,6 +6,7 @@ import '../call_state.dart';
 import '../ringtone_service.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/storage/database.dart';
+import '../../../core/webrtc/network_monitor.dart';
 import '../../../core/webrtc/webrtc_manager.dart';
 
 class CallScreen extends ConsumerStatefulWidget {
@@ -201,6 +202,12 @@ class _CallScreenState extends ConsumerState<CallScreen> {
               const SizedBox(height: 8),
               _NetworkQualityBadge(tier: networkTier)
             ],
+            const SizedBox(height: 8),
+            StreamBuilder<NetworkStats>(
+              stream: call.networkMonitor.stats,
+              builder: (context, _) =>
+                  _CallPathBadge(path: call.networkMonitor.path),
+            ),
             if (call.status == CallStatus.connected) ...[
               const SizedBox(height: 8),
               Text(call.formattedDuration,
@@ -297,9 +304,34 @@ class _NetworkQualityBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (label, color) = switch (tier) {
-      NetworkTier.good => ('Excellent', Colors.green),
-      NetworkTier.moderate => ('Good', Colors.orange),
+      NetworkTier.excellent => ('Excellent', Colors.green),
+      NetworkTier.good => ('Good', Colors.lightGreen),
+      NetworkTier.moderate => ('Fair', Colors.orange),
       NetworkTier.poor => ('Low Bandwidth', Colors.red),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      decoration: BoxDecoration(
+          color: color.withOpacity(0.2),
+          borderRadius: BorderRadius.circular(12)),
+      child: Text(label,
+          style: TextStyle(
+              color: color, fontSize: 12, fontWeight: FontWeight.w600)),
+    );
+  }
+}
+
+/// 显示通话实际走的媒体路径(由 ICE 最终选中的候选对解析)。
+class _CallPathBadge extends StatelessWidget {
+  final CallPath path;
+  const _CallPathBadge({required this.path});
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, color) = switch (path) {
+      CallPath.p2p => ('P2P 直连', Colors.green),
+      CallPath.relay => ('TURN 中继', Colors.orange),
+      CallPath.unknown => ('连接中…', Colors.grey),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),

@@ -2,6 +2,8 @@
 library;
 
 import 'dart:convert';
+import 'dart:io';
+
 import 'package:http/http.dart' as http;
 import '../../app/auth_guard.dart';
 import 'server_config.dart';
@@ -127,6 +129,59 @@ class ApiClient {
       );
     }
     return body;
+  }
+
+  // --- OTA ---
+
+  /// 查询服务器最新版本元数据(公开接口,无需鉴权)。
+  Future<Map<String, dynamic>> checkForUpdate() async {
+    final response = await _client.get(
+      Uri.parse('$_baseUrl/ota/check'),
+      headers: await _authHeaders(),
+    );
+    return _handleResponse(response);
+  }
+
+  /// 下载 APK 到 [destPath],返回文件大小。流式写入,不整包载入内存。
+  /// [onProgress] 可选:下载进度回调(received 已接收字节,total 总字节,未知为 -1)。
+  Future<int> downloadApk(String destPath,
+      {void Function(int received, int total)? onProgress}) async {
+    final request = http.Request('GET', Uri.parse('$_baseUrl/ota/download'));
+    final token = await AuthGuard.getToken();
+    if (token != null) {
+      request.headers['Authorization'] = 'Bearer $token';
+    }
+    final streamed = await _client.send(request);
+    if (streamed.statusCode >= 400) {
+      throw ApiException(
+        statusCode: streamed.statusCode,
+        message: 'OTA download failed: ${streamed.statusCode}',
+      );
+    }
+    final total = streamed.contentLength ?? -1;
+    final file = File(destPath);
+    await file.parent.create(recursive: true);
+    final sink = file.openWrite();
+    var received = 0;
+    try {
+      await streamed.stream.listen(
+        (chunk) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (onProgress != null) onProgress(received, total);
+        },
+        onError: (Object e) async {
+          await sink.close();
+          throw ApiException(statusCode: 0, message: 'download error: $e');
+        },
+      ).asFuture();
+      await sink.close();
+      if (onProgress != null) onProgress(received, total);
+      return received;
+    } catch (e) {
+      await sink.close();
+      rethrow;
+    }
   }
 
   void dispose() => _client.close();

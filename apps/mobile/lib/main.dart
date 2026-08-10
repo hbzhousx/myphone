@@ -4,9 +4,11 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:go_router/go_router.dart';
 import 'app/router.dart';
 import 'app/theme.dart';
+import 'core/network/service_bridge.dart';
 import 'features/calls/incoming_call_state.dart';
 
 Future<void> _reportDebug(String hypothesisId, String message, Map<String, Object?> data) async {
@@ -33,6 +35,19 @@ Future<void> _reportDebug(String hypothesisId, String message, Map<String, Objec
 void main() {
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    // v0.4: 加载持久化常驻开关，决定 createSignalingClient 的传输选型。
+    if (Platform.isAndroid) {
+      try {
+        const _storage = FlutterSecureStorage(
+          aOptions: AndroidOptions(
+            encryptedSharedPreferences: true,
+            resetOnError: true,
+          ),
+        );
+        final v = await _storage.read(key: 'settings_resident');
+        ResidentService.enabled = v != 'false';
+      } catch (_) {}
+    }
     if (kDebugMode) {
       // #region debug-point A:flutter-error
       FlutterError.onError = (details) {
@@ -59,11 +74,51 @@ void main() {
   });
 }
 
-class MyPhoneApp extends ConsumerWidget {
+class MyPhoneApp extends ConsumerStatefulWidget {
   const MyPhoneApp({super.key});
+  @override
+  ConsumerState<MyPhoneApp> createState() => _MyPhoneAppState();
+}
+
+class _MyPhoneAppState extends ConsumerState<MyPhoneApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
+    // v0.4 常驻服务桥接：注册冷启动来电注入 + 启动心跳 + 前台上报。
+    AppIncomingCallBridge.register((call) {
+      ref.read(incomingCallProvider.notifier).setIncoming(call);
+      return true;
+    });
+    ResidentService.startHeartbeat();
+    unawaited(_initResidentBridge());
+  }
+
+  Future<void> _initResidentBridge() async {
+    // 回前台/冷启动：通知服务 app 已存活，读取挂起来电注入。
+    await ResidentService.notifyForegrounded();
+    await ResidentService.injectPendingIncoming();
+  }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final active = state == AppLifecycleState.resumed;
+    unawaited(ResidentService.setAppActive(active));
+    if (active) {
+      unawaited(_initResidentBridge());
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    ResidentService.stopHeartbeat();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final router = ref.watch(routerProvider);
 
     ref.listen<PendingIncomingCall?>(incomingCallProvider, (prev, next) {

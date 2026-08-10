@@ -246,6 +246,18 @@ class DatabaseManager {
     return db.query('call_history', orderBy: 'started_at DESC', limit: limit);
   }
 
+  /// 删除单条通话记录。
+  Future<void> deleteCallHistory(String id) async {
+    final db = await database;
+    await db.delete('call_history', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 清空全部通话记录。
+  Future<void> clearCallHistory() async {
+    final db = await database;
+    await db.delete('call_history');
+  }
+
   Future<void> storeKey(String keyType, List<int> keyData) async {
     final db = await database;
     await db.insert(

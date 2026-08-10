@@ -1,0 +1,7 @@
+{
+  "version": "0.3.0",
+  "build": 3,
+  "url": "/v1/ota/download",
+  "notes": "v0.3: 自适应连接 + 拨号音 + 网络质量指示",
+  "mandatory": false
+}

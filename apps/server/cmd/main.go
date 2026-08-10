@@ -14,6 +14,7 @@ import (
 	"github.com/myphone/server/internal/api"
 	"github.com/myphone/server/internal/discovery"
 	"github.com/myphone/server/internal/models"
+	"github.com/myphone/server/internal/ota"
 	"github.com/myphone/server/internal/signaling"
 )
 
@@ -44,6 +45,7 @@ func main() {
 	keysHandler := api.NewKeysHandler(db)
 	contactDiscovery := discovery.NewContactDiscovery(db)
 	adminHandler := admin.NewHandler(db, hub.Stats)
+	otaHandler := ota.NewHandler(os.Getenv("MYPHONE_UPDATE_DIR"))
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -73,6 +75,8 @@ func main() {
 	r.Get("/ws", api.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		signaling.HandleWebSocket(hub, w, r)
 	}))
+
+	r.Route("/v1/ota", otaHandler.RegisterRoutes)
 
 	adminHandler.RegisterRoutes(r)
 

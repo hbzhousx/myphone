@@ -10,7 +10,9 @@ import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 
-enum NetworkTier { good, moderate, poor }
+import 'ice_policy.dart';
+
+enum NetworkTier { excellent, good, moderate, poor }
 
 class OpusConfig {
   final int bitrateBps;
@@ -31,6 +33,11 @@ class OpusConfig {
 
   factory OpusConfig.forTier(NetworkTier tier) {
     switch (tier) {
+      case NetworkTier.excellent:
+        return const OpusConfig(
+          bitrateBps: 48000, sampleRate: 16000, frameSizeMs: 20,
+          fec: false, dtx: false, complexity: 5,
+        );
       case NetworkTier.good:
         return const OpusConfig(
           bitrateBps: 32000, sampleRate: 16000, frameSizeMs: 20,
@@ -135,6 +142,10 @@ class WebrtcManager {
   static const String _turnUsername = String.fromEnvironment('MYPHONE_TURN_USERNAME');
   static const String _turnCredential = String.fromEnvironment('MYPHONE_TURN_CREDENTIAL');
 
+  /// 供呼叫前自适应 ICE 探测使用(ice_policy.dart 的 determineIcePolicy)。
+  static String get stunUrl => _stunUrl;
+  static String get turnUrl => _turnUrl;
+
   /// 编译期决定的 ICE 服务器列表。
   static const List<Map<String, String>> defaultIceServers = _turnUrl == ''
       ? [
@@ -153,14 +164,15 @@ class WebrtcManager {
 
   WebrtcManager({
     List<Map<String, String>> iceServers = defaultIceServers,
+    IcePolicy policy = IcePolicy.auto,
   }) : _iceServers = {
           'iceServers': iceServers,
           'sdpSemantics': 'unified-plan',
           'encodedInsertableStreams': true,
-          // 强制只走 relay(TURN)：跨 NAT 场景 host/srflx 直连常不可达，
-          // 且手机网络可能限制 UDP。强制 relay 后媒体必走 TURN(经 TCP)，
-          // 这是 GitHub 成功实践(flutter-webrtc issue #1423/#1614)验证过的方案。
-          'iceTransportPolicy': 'relay',
+          // 自适应 ICE 策略：p2p=all(先试 host/srflx 直连，不通 ICE 自动 fallback relay)；
+          // relay=强制走 TURN(经 TCP，适用于手机 UDP 受限场景)。
+          // 由调用方在呼叫前用 determineIcePolicy() 探测决定；auto 默认 all。
+          'iceTransportPolicy': iceTransportPolicyValue(policy),
         };
 
   rtc.RTCPeerConnection? get peerConnection => _peerConnection;

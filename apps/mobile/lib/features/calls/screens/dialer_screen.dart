@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../../core/network/service_bridge.dart';
 import '../../../core/storage/database.dart';
 import '../../contacts/contact_manager.dart';
 import '../call_state.dart';
@@ -24,6 +25,8 @@ class _DialerScreenState extends ConsumerState<DialerScreen> with WidgetsBinding
     // All login paths land on /dialer — warm contact presence in the
     // background so the contacts list shows fresh statuses on first open.
     unawaited(ref.read(contactPresenceProvider.notifier).refresh());
+    // v0.4: 拉起常驻前台服务（独占 WS 保持登录 + 来电唤醒）。幂等。
+    unawaited(ResidentService.ensureStarted());
   }
 
   @override
@@ -161,33 +164,97 @@ class _RecentCallsListState extends State<_RecentCallsList> with WidgetsBindingO
   /// Called from parent when user navigates back after a call.
   void refresh() => _loadCalls();
 
+  Future<void> _deleteCall(Map<String, dynamic> call) async {
+    final id = call['id'] as String?;
+    if (id == null) return;
+    await DatabaseManager.instance.deleteCallHistory(id);
+    setState(() => _calls.removeWhere((c) => c['id'] == id));
+  }
+
+  Future<void> _clearAll() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Clear call history'),
+        content: const Text('Delete all call records?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Clear')),
+        ],
+      ),
+    );
+    if (confirm == true && mounted) {
+      await DatabaseManager.instance.clearCallHistory();
+      setState(() => _calls = []);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) return const Center(child: CircularProgressIndicator());
-    if (_calls.isEmpty) return const Center(child: Text('No recent calls', style: TextStyle(color: Colors.grey)));
-    return ListView.builder(
-      itemCount: _calls.length,
-      itemBuilder: (context, index) {
-        final call = _calls[index];
-        final direction = call['direction'] as String;
-        final isMissed = call['status'] == 'missed';
-        return ListTile(
-          leading: Icon(
-            direction == 'incoming' ? Icons.call_received : Icons.call_made,
-            color: isMissed ? Colors.red : Colors.green,
+    return Column(
+      children: [
+        if (_calls.isNotEmpty)
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: _clearAll,
+              icon: const Icon(Icons.delete_sweep, size: 18),
+              label: const Text('Clear'),
+            ),
           ),
-          title: Text(call['contact_name'] as String? ?? call['contact_id'] as String? ?? 'Unknown'),
-          subtitle: Text(direction == 'incoming' ? 'Incoming' : 'Outgoing'),
-          trailing: const Icon(Icons.call, color: Colors.green),
-          onTap: () {
-            // Tap a history entry to redial the contact.
-            final contactId = call['contact_id'] as String?;
-            if (contactId != null && contactId.isNotEmpty) {
-              context.go('/call/$contactId');
-            }
-          },
-        );
-      },
+        Expanded(
+          child: _calls.isEmpty
+              ? const Center(
+                  child: Text('No recent calls',
+                      style: TextStyle(color: Colors.grey)))
+              : ListView.builder(
+                  itemCount: _calls.length,
+                  itemBuilder: (context, index) {
+                    final call = _calls[index];
+                    final direction = call['direction'] as String;
+                    final isMissed = call['status'] == 'missed';
+                    return Dismissible(
+                      key: ValueKey(call['id']),
+                      direction: DismissDirection.endToStart,
+                      background: Container(
+                        color: Colors.red,
+                        alignment: Alignment.centerRight,
+                        padding: const EdgeInsets.only(right: 20),
+                        child: const Icon(Icons.delete, color: Colors.white),
+                      ),
+                      onDismissed: (_) => _deleteCall(call),
+                      child: ListTile(
+                        leading: Icon(
+                          direction == 'incoming'
+                              ? Icons.call_received
+                              : Icons.call_made,
+                          color: isMissed ? Colors.red : Colors.green,
+                        ),
+                        title: Text(call['contact_name'] as String? ??
+                            call['contact_id'] as String? ??
+                            'Unknown'),
+                        subtitle: Text(direction == 'incoming'
+                            ? 'Incoming'
+                            : 'Outgoing'),
+                        trailing: const Icon(Icons.call, color: Colors.green),
+                        onTap: () {
+                          // Tap a history entry to redial the contact.
+                          final contactId = call['contact_id'] as String?;
+                          if (contactId != null && contactId.isNotEmpty) {
+                            context.go('/call/$contactId');
+                          }
+                        },
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 }

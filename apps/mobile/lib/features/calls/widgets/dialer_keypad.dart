@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../../core/audio/dtmf_player.dart';
+
 class DialerKeypad extends StatelessWidget {
   final void Function(String digit) onDigit;
   final VoidCallback onDelete;
@@ -49,6 +51,7 @@ class DialerKeypad extends StatelessWidget {
               digit: digit,
               onTap: () {
                 HapticFeedback.lightImpact();
+                DtmfPlayer.playDigit(digit);
                 onDigit(digit);
               },
             )).toList(),
