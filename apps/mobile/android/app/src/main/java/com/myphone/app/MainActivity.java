@@ -85,8 +85,8 @@ public class MainActivity extends FlutterFragmentActivity {
                         } else {
                             startService(intent);
                         }
-                        // 持久化服务器配置，供开机自启（BootReceiver）恢复。
-                        CallService.persistServerConfig(host, port, useTls);
+                        // 持久化服务器配置 + 常驻开启标记，供开机自启（BootReceiver）恢复。
+                        CallService.setResidentEnabled(true);
                         result.success(null);
                         break;
                     }

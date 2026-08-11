@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.media.MediaPlayer;
 import android.media.RingtoneManager;
@@ -52,22 +53,26 @@ public class CallService extends Service {
     public static final String EXTRA_INCOMING_CALL_ID = "incoming_call_id";
     public static final String EXTRA_INCOMING_JSON = "incoming_call_json";
 
-    /** 服务器配置持久化（BootReceiver 开机自启读取）。 */
+    /** 服务器配置持久化（START_STICKY 重启 / BootReceiver 开机自启读取）。 */
     private static final String PREFS = "myphone_config";
     public static final String PREF_HOST = "server_host";
     public static final String PREF_PORT = "server_port";
     public static final String PREF_TLS = "server_tls";
+    public static final String PREF_TOKEN = "server_token";
+    public static final String PREF_RESIDENT = "resident_enabled";
 
-    /** Flutter ensureStarted 时写入服务器配置，供开机自启恢复。 */
-    public static void persistServerConfig(String host, int port, boolean useTls) {
+    /** 记录常驻开关状态，供 BootReceiver 判断是否开机自启。 */
+    public static void setResidentEnabled(boolean enabled) {
         CallService svc = instance;
         if (svc == null) return;
         svc.getSharedPreferences(PREFS, MODE_PRIVATE)
-            .edit()
-            .putString(PREF_HOST, host)
-            .putInt(PREF_PORT, port)
-            .putBoolean(PREF_TLS, useTls)
-            .apply();
+            .edit().putBoolean(PREF_RESIDENT, enabled).apply();
+    }
+
+    /** 是否启用了常驻（默认 true；用户关闭或登出后为 false）。 */
+    public static boolean isResidentEnabled(Context ctx) {
+        return ctx.getSharedPreferences(PREFS, MODE_PRIVATE)
+            .getBoolean(PREF_RESIDENT, true);
     }
 
     private static final String CHANNEL_RESIDENT = "resident";
@@ -219,9 +224,13 @@ public class CallService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // 重新拉起（START_STICKY / 重复登录）时配置可能更新。
         if (intent != null) {
+            // 正常拉起 / 重复登录：用 intent 里的配置连接。
             applyConfig(intent);
+        } else {
+            // START_STICKY 重启（进程被系统回收后）：intent 为 null，
+            // 必须从持久化配置恢复，否则 host/token 为 null 永不连接。
+            restoreFromPrefs();
         }
         Notification notif = buildResidentNotification();
         if (Build.VERSION.SDK_INT >= 34) {
@@ -270,12 +279,14 @@ public class CallService extends Service {
         host = newHost;
         port = newPort;
         useTls = newTls;
-        // 持久化服务器配置，供开机自启（BootReceiver）恢复。
+        // 持久化服务器配置 + token，供 START_STICKY 重启 / 开机自启（BootReceiver）恢复。
         getSharedPreferences(PREFS, MODE_PRIVATE)
             .edit()
             .putString(PREF_HOST, host)
             .putInt(PREF_PORT, port)
             .putBoolean(PREF_TLS, useTls)
+            .putString(PREF_TOKEN, token)
+            .putBoolean(PREF_RESIDENT, true)
             .apply();
 
         // 配置更新（重新登录）时重建连接；已用同一配置则忽略。
@@ -283,6 +294,24 @@ public class CallService extends Service {
             reconnectAttempts = 0;
             reconnect();
         }
+    }
+
+    /** START_STICKY 重启（进程被系统回收后 intent=null）：从持久化配置恢复并重连。 */
+    private void restoreFromPrefs() {
+        SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String host = p.getString(PREF_HOST, null);
+        String token = p.getString(PREF_TOKEN, null);
+        if (host == null || token == null || token.isEmpty()) {
+            Log.w(TAG, "restoreFromPrefs: no persisted config, stay idle (wait for app to re-inject)");
+            return;
+        }
+        this.host = host;
+        this.port = p.getInt(PREF_PORT, 8080);
+        this.useTls = p.getBoolean(PREF_TLS, false);
+        this.token = token;
+        this.reconnectAttempts = 0;
+        Log.d(TAG, "restoreFromPrefs: reconnecting to " + host + ":" + this.port);
+        reconnect();
     }
 
     private String wsUrl() {
@@ -328,6 +357,9 @@ public class CallService extends Service {
         shuttingDown = true;
         stopIncomingRing();
         disconnect();
+        // 记录常驻已停（用户关闭或登出），供开机自启判断。
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+            .edit().putBoolean(PREF_RESIDENT, false).apply();
         stopForeground(true);
         stopSelf();
     }
