@@ -261,38 +261,41 @@ class WebrtcManager {
   /// 在 Opus fmtp 行注入 useinbandfec=1，启用 Opus 带内 FEC：
   /// 丢包时用前一帧冗余重建音频，显著缓解"一方网络差导致听不见对方"。
   ///
-  /// 注意：fmtp 行不含 "opus" 字样，只含 payload 编号（如 `a=fmtp:96 ...`），
-  /// opus 编码在 `a=rtpmap:96 opus/48000/2`。因此先收集 rtpmap 里声明为 opus
-  /// 的 payload 编号，再改写对应 fmtp 行。
+  /// 安全实现：用 `\n` 统一拆分（兼容 `\r\n` 与 `\n` 混合行尾），
+  /// 只在 "a=fmtp:<opus payload>" 行追加，绝不改动其他行。
+  /// 仅当确有 opus fmtp 行被注入才返回修改后的 SDP，否则原样返回。
   static String _injectOpusFec(String sdp) {
-    final lines = sdp.split('\r\n');
+    // 用换行符统一拆分（兼容 \r\n 与 \n）
+    final lines = sdp.split('\n');
     // 收集 opus payload 编号（rtpmap 行形如 "a=rtpmap:96 opus/48000/2"）
     final opusPayloads = <String>{};
     for (final line in lines) {
-      final m = RegExp(r'^a=rtpmap:(\d+)\s+opus/').firstMatch(line);
+      final m = RegExp(r'^a=rtpmap:(\d+)\s+opus/').firstMatch(line.trim());
       if (m != null) opusPayloads.add(m.group(1)!);
     }
     if (opusPayloads.isEmpty) return sdp;
 
-    final buf = StringBuffer();
+    final out = <String>[];
     var seen = false;
     for (final line in lines) {
-      // fmtp 行形如 "a=fmtp:96 minptime=10;usedtx=1"
-      if (line.startsWith('a=fmtp:')) {
-        final pt = RegExp(r'^a=fmtp:(\d+)').firstMatch(line)?.group(1);
+      final trimmed = line.trim();
+      // 仅匹配 opus fmtp 行：a=fmtp:<opusPayload> ...
+      if (trimmed.startsWith('a=fmtp:')) {
+        final pt = RegExp(r'^a=fmtp:(\d+)').firstMatch(trimmed)?.group(1);
         if (pt != null && opusPayloads.contains(pt)) {
-          if (line.contains('useinbandfec=1')) {
-            buf.writeln(line);
+          if (trimmed.contains('useinbandfec=1')) {
+            out.add(trimmed);
           } else {
-            buf.writeln('$line;useinbandfec=1');
+            out.add('$trimmed;useinbandfec=1');
           }
           seen = true;
           continue;
         }
       }
-      buf.writeln(line);
+      out.add(line); // 保留原始行（含原行尾），避免破坏 SDP
     }
-    return seen ? buf.toString() : sdp;
+    if (!seen) return sdp;
+    return out.join('\n');
   }
 
   Future<void> setRemoteDescription(String sdp, String type) async {
