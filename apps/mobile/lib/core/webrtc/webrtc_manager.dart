@@ -45,7 +45,9 @@ class OpusConfig {
         );
       case NetworkTier.moderate:
         return const OpusConfig(
-          bitrateBps: 12000, sampleRate: 8000, frameSizeMs: 20,
+          // 16kbps 而非 12kbps：给 Opus 带内 FEC 冗余预留带宽，
+          // 避免"码率降+FEC开"时冗余挤占导致声音仍卡顿。
+          bitrateBps: 16000, sampleRate: 8000, frameSizeMs: 20,
           fec: true, dtx: true, complexity: 4,
         );
       case NetworkTier.poor:
@@ -245,8 +247,11 @@ class WebrtcManager {
       'offerToReceiveAudio': true,
       'offerToReceiveVideo': false,
     });
-    await _peerConnection!.setLocalDescription(offer);
-    return _injectOpusFec(offer.sdp!);
+    // 先注入 FEC 再 setLocalDescription，保证本地与对端协商一致：
+    // 否则本地 peerConnection 用无 FEC 的 SDP，对端用带 FEC 的 → 上行 FEC 不生效。
+    final sdp = _injectOpusFec(offer.sdp!);
+    await _peerConnection!.setLocalDescription(rtc.RTCSessionDescription(sdp, 'offer'));
+    return sdp;
   }
 
   Future<String> createAnswer() async {
@@ -254,8 +259,9 @@ class WebrtcManager {
       'offerToReceiveAudio': true,
       'offerToReceiveVideo': false,
     });
-    await _peerConnection!.setLocalDescription(answer);
-    return _injectOpusFec(answer.sdp!);
+    final sdp = _injectOpusFec(answer.sdp!);
+    await _peerConnection!.setLocalDescription(rtc.RTCSessionDescription(sdp, 'answer'));
+    return sdp;
   }
 
   /// 在 Opus fmtp 行注入 useinbandfec=1，启用 Opus 带内 FEC：

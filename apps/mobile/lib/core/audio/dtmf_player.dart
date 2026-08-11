@@ -17,7 +17,9 @@ class DtmfPlayer {
       '#' => 'hash',
       _ => digit,
     };
-    return 'assets/sounds/dtmf/dtmf_$name.wav';
+    // audioplayers 的 AssetSource 会自行补 "assets/" 前缀,
+    // 因此这里返回 assets 根目录下的相对路径,避免变成 assets/assets/...
+    return 'sounds/dtmf/dtmf_$name.wav';
   }
 
   /// 播放一个按键音。非数字键(如删除/呼叫)可传空或直接不调用。
