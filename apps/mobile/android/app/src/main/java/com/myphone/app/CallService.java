@@ -11,6 +11,9 @@ import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.media.MediaPlayer;
 import android.media.RingtoneManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -154,6 +157,9 @@ public class CallService extends Service {
     private WebSocket socket;
     private int reconnectAttempts;
     private boolean shuttingDown;
+    /** 网络变化监听：WiFi/移动数据切换、断网恢复时立即重连，保证 WS 秒级恢复在线。 */
+    private ConnectivityManager.NetworkCallback networkCallback;
+    private boolean networkConnected;
 
     // ---- 静态入口（MainActivity 转发 MethodChannel 调用） ----
 
@@ -213,6 +219,12 @@ public class CallService extends Service {
         if (svc != null) svc.stopResident();
     }
 
+    /** Flutter 接听/拒绝后显式停原生响铃（兜底：任何路径起的原生响铃都停掉）。 */
+    public static void stopNativeRing() {
+        CallService svc = instance;
+        if (svc != null) svc.stopIncomingRing();
+    }
+
     // ---- Service 生命周期 ----
 
     @Override
@@ -220,6 +232,7 @@ public class CallService extends Service {
         super.onCreate();
         instance = this;
         createNotificationChannels();
+        registerNetworkMonitor();
     }
 
     @Override
@@ -250,11 +263,74 @@ public class CallService extends Service {
     @Override
     public void onDestroy() {
         shuttingDown = true;
+        unregisterNetworkMonitor();
         stopIncomingRing();
         disconnect();
         handler.removeCallbacksAndMessages(null);
         instance = null;
         super.onDestroy();
+    }
+
+    // ---- 网络感知即时重连 ----
+
+    private void registerNetworkMonitor() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return;
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    // 网络恢复/切换完成：立即重连（不等指数退避）。
+                    // 不检查 socket==null —— 断网时旧 WS 可能还没触发 onFailure
+                    // 清理，socket 仍非 null。网络恢复就强制重建连接。
+                    Log.d(TAG, "network available, reconnect now");
+                    networkConnected = true;
+                    handler.post(() -> {
+                        if (!shuttingDown) {
+                            reconnectAttempts = 0;
+                            reconnect();
+                        }
+                    });
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    Log.d(TAG, "network lost");
+                    networkConnected = false;
+                }
+
+                @Override
+                public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                    // 网络恢复但 WS 可能已断（切换时旧 WS 必断）：网络有效则强制重连。
+                    boolean hasNet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+                    if (hasNet && !networkConnected) {
+                        networkConnected = true;
+                        Log.d(TAG, "network capabilities changed, reconnect");
+                        handler.post(() -> {
+                            if (!shuttingDown) {
+                                reconnectAttempts = 0;
+                                reconnect();
+                            }
+                        });
+                    }
+                }
+            };
+            cm.registerDefaultNetworkCallback(networkCallback);
+        } catch (Exception e) {
+            Log.w(TAG, "register network monitor failed: " + e);
+        }
+    }
+
+    private void unregisterNetworkMonitor() {
+        try {
+            if (networkCallback != null) {
+                ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) cm.unregisterNetworkCallback(networkCallback);
+                networkCallback = null;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "unregister network monitor failed: " + e);
+        }
     }
 
     @Override

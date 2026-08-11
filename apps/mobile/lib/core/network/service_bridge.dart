@@ -65,6 +65,12 @@ class ResidentService {
     await _channel.invokeMethod('logout');
   }
 
+  /// 接听/拒绝来电后显式停原生响铃（兜底原生响铃未自动停的场景）。
+  static Future<void> stopNativeRing() async {
+    if (!Platform.isAndroid) return;
+    await _channel.invokeMethod('stopNativeRing');
+  }
+
   /// 启动 Flutter 心跳（10s），服务侧据此判断 app 是否仍存活。
   static Timer? _heartbeat;
   static void startHeartbeat() {

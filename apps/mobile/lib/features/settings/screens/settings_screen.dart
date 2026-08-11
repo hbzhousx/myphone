@@ -84,15 +84,41 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _openBatteryOptimizationSettings() async {
     if (!Platform.isAndroid) return;
     try {
-      await const MethodChannel('myphone/system').invokeMethod(
-        'openSettings',
-        {'action': 'android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS'},
-      );
+      await const MethodChannel('myphone/system')
+          .invokeMethod('openBatterySettings');
+    } catch (_) {}
+  }
+
+  /// 检测是否已在电池白名单 + 获取厂商，返回可展示的引导文案。
+  Future<String> _batteryHint() async {
+    if (!Platform.isAndroid) return '';
+    try {
+      final status = await const MethodChannel('myphone/system')
+          .invokeMethod('getBatteryStatus') as Map;
+      final ignoring = status['ignoringOptimization'] == true;
+      if (ignoring) return '已加入电池白名单，息屏可保持来电在线 ✅';
+      final m = (status['manufacturer'] as String? ?? '').toLowerCase();
+      if (m.contains('huawei') || m.contains('honor')) {
+        return '华为/荣耀：请在"应用启动管理"中允许自启动+后台运行，否则息屏会被冻结';
+      } else if (m.contains('vivo') || m.contains('iqoo')) {
+        return 'vivo/iQOO：请在"自启动管理"中允许 MyPhone 自启动，否则息屏会被冻结';
+      } else if (m.contains('xiaomi') || m.contains('redmi') || m.contains('poco')) {
+        return '小米/Redmi/POCO：请在"自启动管理"中允许自启动，否则息屏会被冻结';
+      } else if (m.contains('oppo') || m.contains('realme') || m.contains('oneplus')) {
+        return 'OPPO/realme/一加：请在"自启动"中允许后台运行，否则息屏会被冻结';
+      } else if (m.contains('samsung')) {
+        return '三星：请在"电池-后台使用限制"中设为不受限制';
+      } else if (m.contains('meizu')) {
+        return '魅族：请在"应用管理-自启动"中允许自启动';
+      } else if (m.contains('zte') || m.contains('nubia')) {
+        return '中兴/Nubia：请在"电池"中设为不优化';
+      } else if (m.contains('lenovo') || m.contains('motorola')) {
+        return '联想/Moto：请在"电池优化"中选择不优化';
+      } else {
+        return '点击加入电池白名单，防止息屏时被系统冻结';
+      }
     } catch (_) {
-      await const MethodChannel('myphone/system').invokeMethod(
-        'openSettings',
-        {'action': 'android.settings.SETTINGS'},
-      );
+      return '点击加入电池白名单，防止息屏时被系统冻结';
     }
   }
 
@@ -236,7 +262,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ListTile(
               leading: const Icon(Icons.battery_saver),
               title: const Text('加入电池白名单'),
-              subtitle: const Text('防止系统省电策略杀死常驻服务（小米/华为/OPPO 等）'),
+              subtitle: FutureBuilder<String>(
+                future: _batteryHint(),
+                builder: (context, snapshot) => Text(
+                  snapshot.data ?? '检测中...',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: (snapshot.data?.contains('✅') ?? false)
+                        ? Colors.green
+                        : Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
               onTap: _openBatteryOptimizationSettings,
             ),
           ],

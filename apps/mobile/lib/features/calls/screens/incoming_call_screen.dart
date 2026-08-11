@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../../core/network/service_bridge.dart';
 import '../call_state.dart';
 import '../incoming_call_state.dart';
 import '../ringtone_service.dart';
@@ -21,6 +24,8 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
 
   Future<void> _decline(WidgetRef ref, PendingIncomingCall incoming) async {
     RingtoneService.stop();
+    // 停原生响铃（兜底：冷启动/后台拉起时原生响铃可能未停）。
+    unawaited(ResidentService.stopNativeRing());
     final notifier = ref.read(callStateProvider.notifier);
     await notifier.declineIncomingCall(incoming);
     ref.read(incomingCallProvider.notifier).clear();
@@ -29,6 +34,8 @@ class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
 
   Future<void> _accept(WidgetRef ref, PendingIncomingCall incoming) async {
     RingtoneService.stop();
+    // 停原生响铃（兜底：冷启动/后台拉起时原生响铃可能未停）。
+    unawaited(ResidentService.stopNativeRing());
     final contactId = incoming.contactId;
     try {
       await ref.read(callStateProvider.notifier).acceptIncomingCall(
