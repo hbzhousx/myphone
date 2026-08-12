@@ -59,12 +59,15 @@ class ChatSessionController {
     int expiresInSeconds = 0,
   }) async {
     var session = await _sessions.loadSession(_conversationId);
+    Map<String, dynamic>? initPayload;
     if (session == null) {
       try {
-        session = await _sessions.establishAsInitiator(
+        initPayload = await _sessions.establishAsInitiator(
           remoteUserId: _remoteUserId,
           conversationId: _conversationId,
         );
+        // 建立会话后重新加载（establishAsInitiator 持久化了新会话）。
+        session = await _sessions.loadSession(_conversationId);
       } catch (e) {
         return {'error': 'no session: $e'};
       }
@@ -74,6 +77,7 @@ class ChatSessionController {
     final messageId = _newId();
     final plaintext =
         utf8.encode(jsonEncode({'kind': isEmoji ? 'emoji' : 'text', 'body': body}));
+    if (session == null) return {'error': 'session unavailable'};
 
     final aad = ChatRatchet.associatedData(
       senderUserId: _localUserId,
@@ -87,6 +91,7 @@ class ChatSessionController {
       'message_id': messageId,
       'ciphertext': base64Encode(enc.frame.toBytes()),
       'expires_in_seconds': expiresInSeconds,
+      if (initPayload != null) 'init_payload': initPayload,
     };
     final sig = ChatSignal(
       type: ChatSignalType.chatMessage,
@@ -259,8 +264,13 @@ class ChatSessionController {
     });
   }
 
-  /// 发送阅后即焚设置变更（会话默认）。
+  /// 发送阅后即焚设置变更（会话默认），并同步本地（避免轮询重置）。
   void sendDisappearingSetting(int seconds) {
+    _db.upsertConversation({
+      'id': _conversationId,
+      'remote_user_id': _remoteUserId,
+      'disappearing_seconds': seconds,
+    });
     _signaling.sendChatSignal(ChatSignal(
       type: ChatSignalType.chatDisappearing,
       fromUserId: _localUserId,
@@ -281,9 +291,23 @@ class ChatSessionController {
 
   Future<void> _touchConversation(String preview, String lastMessageId) async {
     final now = DateTime.now().millisecondsSinceEpoch;
+    // 保留已有 display_name：upsert 用 replace 会覆盖整行，若这里不带会清空名字。
+    String? displayName;
+    try {
+      final existing = await _db.getConversation(_conversationId);
+      displayName = existing?['remote_display_name'] as String?;
+      if ((displayName == null || displayName.isEmpty) &&
+          _remoteUserId.isNotEmpty) {
+        final contact = await _db.getContact(_remoteUserId);
+        if (contact != null) {
+          displayName = contact['display_name'] as String?;
+        }
+      }
+    } catch (_) {}
     await _db.upsertConversation({
       'id': _conversationId,
       'remote_user_id': _remoteUserId,
+      'remote_display_name': displayName,
       'last_message_at': now,
       'last_message_preview':
           preview.length > 60 ? preview.substring(0, 60) : preview,
@@ -320,12 +344,14 @@ class ChatSessionController {
     if (!await src.exists()) return {'error': 'file not found'};
 
     var session = await _sessions.loadSession(_conversationId);
+    Map<String, dynamic>? initPayload;
     if (session == null) {
       try {
-        session = await _sessions.establishAsInitiator(
+        initPayload = await _sessions.establishAsInitiator(
           remoteUserId: _remoteUserId,
           conversationId: _conversationId,
         );
+        session = await _sessions.loadSession(_conversationId);
       } catch (e) {
         return {'error': 'no session: $e'};
       }
@@ -355,6 +381,7 @@ class ChatSessionController {
       recipientUserId: _remoteUserId,
       conversationId: _conversationId,
     );
+    if (session == null) return {'error': 'session unavailable'};
     final enc = await ChatRatchet.encrypt(session, utf8.encode(jsonEncode(meta)), aad: aad);
     await _sessions.saveSession(_conversationId, enc.session);
 
@@ -368,6 +395,7 @@ class ChatSessionController {
         'message_id': messageId,
         'ciphertext': base64Encode(enc.frame.toBytes()),
         'expires_in_seconds': expiresInSeconds,
+        if (initPayload != null) 'init_payload': initPayload,
       },
     ));
 

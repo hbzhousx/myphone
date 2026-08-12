@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mime/mime.dart';
 import 'package:path/path.dart' as p;
+import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/storage/database.dart';
 import '../chat_state.dart';
@@ -232,6 +233,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// 选图片/拍照发送。
   Future<void> _sendImage(ImageSource source) async {
     try {
+      // 拍照需相机权限；图库 Android 13+ 需 READ_MEDIA_IMAGES。
+      final perm = source == ImageSource.camera
+          ? Permission.camera
+          : Permission.photos;
+      if (!await perm.request().isGranted) {
+        _showSendError('需要相机/存储权限才能发送图片');
+        return;
+      }
       final picked = await ImagePicker().pickImage(
         source: source,
         maxWidth: 1920,
@@ -261,12 +270,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       await _loadMessages();
     } catch (e) {
       debugPrint('[CHAT] pick image failed: $e');
+      _showSendError('发送图片失败');
     }
   }
 
   /// 选任意文件发送。
   Future<void> _sendFilePicker() async {
     try {
+      // 文件选择需存储权限（Android 13+ 用 READ_MEDIA_IMAGES 覆盖）。
+      if (!await Permission.storage.request().isGranted) {
+        _showSendError('需要存储权限才能选择文件');
+        return;
+      }
       final picked = await FilePicker.platform.pickFiles();
       if (picked == null || picked.files.isEmpty || !mounted) return;
       final f = picked.files.first;
@@ -276,9 +291,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         return;
       }
       final name = f.name.isNotEmpty ? f.name : p.basename(path);
-      final mime = f.extension != null
-          ? lookupMimeType(name)
-          : (lookupMimeType(name) ?? 'application/octet-stream');
+      final mime = lookupMimeType(name) ?? 'application/octet-stream';
       final result = await ref
           .read(chatStateProvider.notifier)
           .controllerFor(
@@ -287,9 +300,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           )
           .sendFile(
             filePath: path,
-            kind: mime != null && mime.startsWith('video/') ? 'video' : 'file',
+            kind: mime.startsWith('video/') ? 'video' : 'file',
             fileName: name,
-            mimeType: mime ?? 'application/octet-stream',
+            mimeType: mime,
             expiresInSeconds: _disappearSeconds,
           );
       if (result != null && result.containsKey('error')) {
@@ -298,7 +311,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       await _loadMessages();
     } catch (e) {
       debugPrint('[CHAT] pick file failed: $e');
-      _showSendError('选择文件失败');
+      _showSendError('选择文件失败：$e');
     }
   }
 

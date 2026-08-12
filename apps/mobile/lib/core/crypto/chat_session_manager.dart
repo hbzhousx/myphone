@@ -122,7 +122,8 @@ class ChatSessionManager {
   // ---- 发起方 X3DH ----
 
   /// 发起方建立会话：取对端 bundle → 验签 → X3DH → 初始化棘轮 → 持久化。
-  Future<ChatRatchetSession> establishAsInitiator({
+  /// 返回 initPayload（发起方 X3DH 公钥输入），首条消息携带给响应方建立会话。
+  Future<Map<String, dynamic>> establishAsInitiator({
     required String remoteUserId,
     required String conversationId,
   }) async {
@@ -134,6 +135,9 @@ class ChatSessionManager {
 
     final spk = bundle['signed_prekey'] as Map<String, dynamic>;
     final spkPub = CryptoManager.keyFromHex(spk['public_key'] as String);
+    final spkKeyId = spk['key_id'] as int?;
+    final otp = bundle['one_time_prekey'] as Map<String, dynamic>?;
+    final otpKeyId = otp?['key_id'] as int?;
 
     // 尽力而为的签名预密钥校验：服务器 bundle 携带签名公钥时才校验。
     // （当前服务器未存 Ed25519 签名公钥，无法强验；身份绑定由 _verifyRemoteIdentity
@@ -156,7 +160,6 @@ class ChatSessionManager {
 
     final ourIdentity = await loadOrCreateIdentityKey();
     final ourEph = await CryptoManager.generateIdentityKeyPair();
-    final otp = bundle['one_time_prekey'] as Map<String, dynamic>?;
 
     final root = await CryptoManager.x3dhKeyAgreement(
       ourIdentityKey: ourIdentity,
@@ -190,7 +193,16 @@ class ChatSessionManager {
       Uint8List.fromList(kdf.sublist(32, 64)),
     );
     await _saveSession(conversationId, session, remoteUserId);
-    return session;
+
+    // 首条消息携带的 X3DH 公钥输入：响应方据此建立会话。
+    final ourIdentityPub = await ourIdentity.extractPublicKey();
+    final ourEphPub = await ourEph.extractPublicKey();
+    return {
+      'identity_public_key': hex.encode(ourIdentityPub.bytes),
+      'ephemeral_public_key': hex.encode(ourEphPub.bytes),
+      'signed_prekey_id': spkKeyId,
+      'one_time_prekey_id': otpKeyId,
+    };
   }
 
   // ---- 响应方 X3DH ----
