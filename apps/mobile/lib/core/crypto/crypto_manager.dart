@@ -149,6 +149,16 @@ class CryptoManager {
     return crypto.sha256.convert(bytes).toString();
   }
 
+  /// HKDF-SHA256 derive（公开，供聊天棘轮复用）。
+  static Future<Uint8List> hkdf(
+    List<int> ikm,
+    String info,
+    int len, {
+    List<int>? nonce,
+  }) {
+    return _hkdf(ikm, info, len, nonce: nonce);
+  }
+
   /// HKDF-SHA256 derive.
   static Future<Uint8List> _hkdf(
     List<int> ikm,
@@ -164,6 +174,50 @@ class CryptoManager {
     );
     return Uint8List.fromList(sk.bytes);
   }
+
+  /// AES-256-GCM 加密（带可选 AAD，供聊天棘轮绑定会话身份）。
+  static Future<Uint8List> aesGcmEncrypt(
+    List<int> plaintext, {
+    required List<int> key,
+    required List<int> nonce,
+    List<int> aad = const [],
+  }) async {
+    final aes = AesGcm.with256bits(nonceLength: nonce.length);
+    final box = await aes.encrypt(
+      plaintext,
+      secretKey: SecretKey(key),
+      nonce: nonce,
+      aad: aad,
+    );
+    return Uint8List.fromList([
+      ...box.nonce,
+      ...box.cipherText,
+      ...box.mac.bytes,
+    ]);
+  }
+
+  /// AES-256-GCM 解密（AAD 必须与加密时一致）。
+  static Future<Uint8List> aesGcmDecrypt(
+    List<int> encrypted, {
+    required List<int> key,
+    required int nonceLength,
+    List<int> aad = const [],
+  }) async {
+    final aes = AesGcm.with256bits(nonceLength: nonceLength);
+    final nonce = encrypted.sublist(0, nonceLength);
+    final macLength = aes.macAlgorithm.macLength;
+    final macBytes = encrypted.sublist(encrypted.length - macLength);
+    final body = encrypted.sublist(nonceLength, encrypted.length - macLength);
+    final pt = await aes.decrypt(
+      SecretBox(body, nonce: nonce, mac: Mac(macBytes)),
+      secretKey: SecretKey(key),
+      aad: aad,
+    );
+    return Uint8List.fromList(pt);
+  }
+
+  /// 真随机 12 字节 nonce（修复旧 `_random12()` 时间戳位移的弱熵源）。
+  static Uint8List randomNonce12() => randomBytes(12);
 
   static Future<Uint8List> _concatAndKdf(
     List<List<int>> parts, String info, int len) async {

@@ -80,8 +80,10 @@ public class CallService extends Service {
 
     private static final String CHANNEL_RESIDENT = "resident";
     private static final String CHANNEL_INCOMING = "incoming_call";
+    private static final String CHANNEL_CHAT = "chat";
     private static final int NOTIF_ID_RESIDENT = 1001;
     private static final int NOTIF_ID_INCOMING = 1002;
+    private static final int NOTIF_ID_CHAT = 1003;
 
     /** 来电全屏后，Flutter 未接管则响铃 X ms 自动挂断并回 busy。 */
     private static final long INCOMING_RING_TIMEOUT_MS = 30_000;
@@ -491,6 +493,10 @@ public class CallService extends Service {
                 // 对端已挂断/已接：停响铃、清 pending，交由 Flutter 处理。
                 stopIncomingRing();
                 pendingOffer = null;
+            } else if ("chatMessage".equals(type) && !appActive) {
+                // 后台/被杀时收到新聊天消息：普通通知提示，不含消息内容
+                // （服务无法解密密文，避免明文泄漏）；app 前台则交给 Flutter 处理。
+                postChatNotification();
             }
         } catch (JSONException ignored) {
         }
@@ -668,6 +674,10 @@ public class CallService extends Service {
         incoming.setBypassDnd(true);
         incoming.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
         nm.createNotificationChannel(incoming);
+        NotificationChannel chat = new NotificationChannel(
+            CHANNEL_CHAT, "聊天消息", NotificationManager.IMPORTANCE_DEFAULT);
+        chat.setDescription("收到新聊天消息");
+        nm.createNotificationChannel(chat);
     }
 
     private Notification buildResidentNotification() {
@@ -684,5 +694,26 @@ public class CallService extends Service {
             .setOngoing(true)
             .setPriority(Notification.PRIORITY_MIN)
             .build();
+    }
+
+    /** 后台/被杀时的新聊天消息通知：仅提示，不展示内容（服务不解密，隐私）。 */
+    private void postChatNotification() {
+        Notification.Builder b;
+        if (Build.VERSION.SDK_INT >= 26) {
+            b = new Notification.Builder(this, CHANNEL_CHAT);
+        } else {
+            b = new Notification.Builder(this);
+        }
+        b.setContentTitle("MyPhone")
+            .setContentText("收到一条新消息")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setPriority(Notification.PRIORITY_DEFAULT)
+            .setAutoCancel(true);
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        try {
+            nm.notify(NOTIF_ID_CHAT, b.build());
+        } catch (Exception e) {
+            Log.w(TAG, "chat notif failed: " + e);
+        }
     }
 }

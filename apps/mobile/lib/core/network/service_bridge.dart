@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 
 import '../../app/auth_guard.dart';
 import '../../features/calls/incoming_call_state.dart';
+import 'chat_signal.dart';
 import 'server_config.dart';
 import 'signaling_client.dart';
 
@@ -157,10 +158,14 @@ class ServiceBridgeSignalingClient extends SignalingClient {
   static const EventChannel _events = EventChannel('myphone/service_events');
 
   final _signalController = StreamController<CallSignal>.broadcast();
+  final _chatController = StreamController<ChatSignal>.broadcast();
   StreamSubscription? _eventSub;
 
   @override
   Stream<CallSignal> get signals => _signalController.stream;
+
+  @override
+  Stream<ChatSignal> get chatSignals => _chatController.stream;
 
   @override
   set onDisconnected(VoidCallback? cb) {
@@ -175,6 +180,11 @@ class ServiceBridgeSignalingClient extends SignalingClient {
         try {
           final json = jsonDecode(data) as Map<String, dynamic>;
           debugPrint('[SERVICE-BRIDGE] recv ${json['type']} callId=${json['call_id']} from=${json['from_user_id']}');
+          final typ = json['type'] as String?;
+          if (typ != null && ChatSignal.typeNames.contains(typ)) {
+            _chatController.add(ChatSignal.fromJson(json));
+            return;
+          }
           _signalController.add(CallSignal.fromJson(json));
         } catch (_) {
           debugPrint('[SERVICE-BRIDGE] bad signal: $data');
@@ -194,9 +204,17 @@ class ServiceBridgeSignalingClient extends SignalingClient {
   }
 
   @override
+  void sendChatSignal(ChatSignal signal) {
+    final data = jsonEncode(signal.toJson());
+    debugPrint('[SERVICE-BRIDGE] send chat type=${signal.type.name} to=${signal.toUserId} msgId=${signal.messageId}');
+    _channel.invokeMethod('sendSignal', {'signal': data});
+  }
+
+  @override
   void dispose() {
     _eventSub?.cancel();
     _eventSub = null;
     _signalController.close();
+    _chatController.close();
   }
 }

@@ -8,6 +8,8 @@ import '../features/calls/screens/call_screen.dart';
 import '../features/calls/screens/dialer_screen.dart';
 import '../features/calls/screens/incoming_call_screen.dart';
 import '../features/calls/screens/keypad_screen.dart';
+import '../features/chat/screens/chat_screen.dart';
+import '../features/chat/screens/conversations_screen.dart';
 import '../features/contacts/screens/contacts_screen.dart';
 import '../features/contacts/screens/contact_detail_screen.dart';
 import '../features/settings/screens/settings_screen.dart';
@@ -59,6 +61,17 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/settings',
         builder: (context, state) => const SettingsScreen(),
+      ),
+      GoRoute(
+        path: '/conversations',
+        builder: (context, state) => const ConversationsScreen(),
+      ),
+      GoRoute(
+        path: '/chat/:contactId',
+        builder: (context, state) {
+          final contactId = state.pathParameters['contactId']!;
+          return ChatScreen(contactId: contactId);
+        },
       ),
       GoRoute(
         path: '/call/:contactId',

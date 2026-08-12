@@ -72,6 +72,33 @@ class ApiClient {
     return _handleResponse(response);
   }
 
+  /// 上传签名预密钥（聊天/通话 X3DH 用）。
+  Future<void> uploadSignedPreKey({
+    required int keyId,
+    required String publicKey,
+    required String signature,
+  }) async {
+    final response = await _client.post(
+      Uri.parse('$_baseUrl/keys/signed-prekey'),
+      headers: await _authHeaders(),
+      body: jsonEncode({
+        'key_id': keyId,
+        'public_key': publicKey,
+        'signature': signature,
+      }),
+    );
+    _handleResponse(response);
+  }
+
+  /// 取目标用户的完整 prekey 束（identity + signed-prekey + 一次性 prekey）。
+  Future<Map<String, dynamic>> fetchKeyBundle(String userId) async {
+    final response = await _client.get(
+      Uri.parse('$_baseUrl/keys/bundle/$userId'),
+      headers: await _authHeaders(),
+    );
+    return _handleResponse(response);
+  }
+
   // --- Contact Discovery ---
 
   Future<List<Map<String, dynamic>>> discoverContacts(List<String> phoneHashes) async {

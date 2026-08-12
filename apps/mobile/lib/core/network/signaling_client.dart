@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../../app/auth_guard.dart';
+import 'chat_signal.dart';
 import 'server_config.dart';
 
 enum CallSignalType {
@@ -64,6 +65,9 @@ class CallSignal {
 abstract class SignalingClient {
   Stream<CallSignal> get signals;
 
+  /// 聊天信令流（与通话信令同一条 WS，按 type 分发）。
+  Stream<ChatSignal> get chatSignals;
+
   /// WS 断线回调（仅 [DirectWSSignalingClient] 触发；桥接模式下服务自愈重连，
   /// 由服务端保证在线，不向 Flutter 上报断线）。
   set onDisconnected(VoidCallback? cb);
@@ -75,6 +79,9 @@ abstract class SignalingClient {
 
   /// 发送一个信令（由具体传输实现）。
   void sendSignal(CallSignal signal);
+
+  /// 发送一个聊天信令（由具体传输实现）。
+  void sendChatSignal(ChatSignal signal);
 
   // ---- 便捷发送方法（所有传输共用，序列化后调 [sendSignal]） ----
 
@@ -197,6 +204,7 @@ class DirectWSSignalingClient extends SignalingClient {
   final String _baseUrl = ServerConfig.wsEndpoint;
   WebSocketChannel? _channel;
   final _signalController = StreamController<CallSignal>.broadcast();
+  final _chatController = StreamController<ChatSignal>.broadcast();
   Timer? _pingTimer;
   Timer? _reconnectTimer;
   VoidCallback? _onDisconnected;
@@ -207,6 +215,9 @@ class DirectWSSignalingClient extends SignalingClient {
 
   @override
   Stream<CallSignal> get signals => _signalController.stream;
+
+  @override
+  Stream<ChatSignal> get chatSignals => _chatController.stream;
 
   @override
   Future<void> connect() async {
@@ -231,6 +242,12 @@ class DirectWSSignalingClient extends SignalingClient {
       (data) {
         final json = jsonDecode(data as String) as Map<String, dynamic>;
         debugPrint('[SIGNAL] recv ${json['type']} callId=${json['call_id']} from=${json['from_user_id']}');
+        // 聊天信令按 type 分发到独立流，避免 CallSignal.fromJson 对未知类型抛异常。
+        final typ = json['type'] as String?;
+        if (typ != null && ChatSignal.typeNames.contains(typ)) {
+          _chatController.add(ChatSignal.fromJson(json));
+          return;
+        }
         _signalController.add(CallSignal.fromJson(json));
       },
       onError: (e) {
@@ -281,11 +298,19 @@ class DirectWSSignalingClient extends SignalingClient {
   }
 
   @override
+  void sendChatSignal(ChatSignal signal) {
+    final data = jsonEncode(signal.toJson());
+    debugPrint('[CHAT] send type=${signal.type.name} to=${signal.toUserId} msgId=${signal.messageId}');
+    _channel?.sink.add(data);
+  }
+
+  @override
   void dispose() {
     _disposed = true;
     _reconnectTimer?.cancel();
     _pingTimer?.cancel();
     _signalController.close();
+    _chatController.close();
     _channel?.sink.close();
   }
 }

@@ -1,13 +1,16 @@
 package signaling
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -31,11 +34,22 @@ type Client struct {
 	Connected time.Time
 }
 
+// 聊天离线队列参数。
+const (
+	chatQueueTTL     = 24 * time.Hour // 队列保留时长（= 消息过期时间）
+	chatSeenTTL      = 48 * time.Hour // 去重窗口
+	chatQueueKey     = "chat:queue:%s"
+	chatSeenKey      = "chat:seen:%s"
+)
+
 type Hub struct {
 	clients    map[string]*Client
 	register   chan *Client
 	unregister chan *Client
 	mu         sync.RWMutex
+
+	// Redis 客户端（可为 nil：聊天离线消息退化为「离线即丢弃」，不影响通话中继）。
+	redis *redis.Client
 
 	TotalMessages  int64
 	CallsActive    int
@@ -45,11 +59,12 @@ type Hub struct {
 	callMu         sync.Mutex
 }
 
-func NewHub() *Hub {
+func NewHub(redisClient *redis.Client) *Hub {
 	return &Hub{
 		clients:       make(map[string]*Client),
 		register:      make(chan *Client),
 		unregister:    make(chan *Client),
+		redis:         redisClient,
 		StartTime:     time.Now(),
 		ActiveCallIDs: make(map[string]bool),
 	}
@@ -63,6 +78,8 @@ func (h *Hub) Run() {
 			h.clients[client.userID] = client
 			h.mu.Unlock()
 			log.Printf("client connected: %s", client.userID)
+			// 上线后冲刷离线聊天队列（FIFO）。
+			h.flushChatQueue(client.userID)
 		case client := <-h.unregister:
 			h.mu.Lock()
 			// Only remove THIS connection from the map.  A reconnect may have
@@ -213,9 +230,75 @@ func (c *Client) readPump() {
 		log.Printf("[SIGNAL] recv type=%v call=%v from=%v to=%v", typ, callID, fromUserID, toUserID)
 
 		if toID, ok := toUserID.(string); ok && toID != "" {
+			// 聊天消息：目标离线时进 Redis 短期队列，目标在线则按通话路径直转。
+			if s, ok := typ.(string); ok && s == "chatMessage" {
+				c.hub.handleChatMessage(signal, message, toID)
+				continue
+			}
 			sendToUser(c.hub, toID, message)
 		}
 	}
+}
+
+// handleChatMessage 处理聊天消息中继。目标在线 → 直转；离线 → 入 Redis 队列（24h TTL）。
+// 队列只存端到端密文信封 + 路由信息；服务器始终无法解密消息内容。
+func (h *Hub) handleChatMessage(signal map[string]interface{}, raw []byte, toID string) {
+	payload, _ := signal["payload"].(map[string]interface{})
+	msgID, _ := payload["message_id"].(string)
+	if msgID == "" {
+		log.Printf("[CHAT] drop: chatMessage without message_id")
+		return
+	}
+
+	if h.redis == nil {
+		// Redis 不可用：退化为离线即丢弃（与通话中继行为一致）。
+		if !h.IsOnline([]string{toID})[toID] {
+			log.Printf("[CHAT] drop: target %s offline (no redis)", toID)
+		} else {
+			sendToUser(h, toID, raw)
+		}
+		return
+	}
+
+	ctx := context.Background()
+	if h.IsOnline([]string{toID})[toID] {
+		sendToUser(h, toID, raw)
+		return
+	}
+
+	// 去重：同一 message_id 只入队一次（防重传双投）。
+	seen, err := h.redis.SIsMember(ctx, fmt.Sprintf(chatSeenKey, msgID), msgID).Result()
+	if err == nil && seen {
+		log.Printf("[CHAT] drop: duplicate message_id=%s", msgID)
+		return
+	}
+	if err == nil {
+		h.redis.SAdd(ctx, fmt.Sprintf(chatSeenKey, msgID), msgID)
+		h.redis.Expire(ctx, fmt.Sprintf(chatSeenKey, msgID), chatSeenTTL)
+	}
+
+	key := fmt.Sprintf(chatQueueKey, toID)
+	h.redis.RPush(ctx, key, string(raw))
+	h.redis.Expire(ctx, key, chatQueueTTL)
+	log.Printf("[CHAT] queued for offline user=%s message_id=%s", toID, msgID)
+}
+
+// flushChatQueue 上线时按 FIFO 冲刷离线聊天队列并清除。
+func (h *Hub) flushChatQueue(userID string) {
+	if h.redis == nil {
+		return
+	}
+	ctx := context.Background()
+	key := fmt.Sprintf(chatQueueKey, userID)
+	items, err := h.redis.LRange(ctx, key, 0, -1).Result()
+	if err != nil || len(items) == 0 {
+		return
+	}
+	for _, it := range items {
+		sendToUser(h, userID, []byte(it))
+	}
+	h.redis.Del(ctx, key)
+	log.Printf("[CHAT] flushed %d queued messages for user=%s", len(items), userID)
 }
 
 func (c *Client) writePump() {

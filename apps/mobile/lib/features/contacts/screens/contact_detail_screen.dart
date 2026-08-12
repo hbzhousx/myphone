@@ -77,7 +77,9 @@ class _ContactDetailScreenState extends ConsumerState<ContactDetailScreen> {
                     label: 'Audio Call',
                     onTap: () => context.go('/call/${contact.id}')),
                 _ActionButton(
-                    icon: Icons.message, label: 'Message', onTap: () {}),
+                    icon: Icons.message,
+                    label: 'Message',
+                    onTap: () => context.push('/chat/${contact.id}')),
               ],
             ),
           ),

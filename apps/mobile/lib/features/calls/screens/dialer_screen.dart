@@ -45,7 +45,7 @@ class _DialerScreenState extends ConsumerState<DialerScreen> with WidgetsBinding
   @override
   Widget build(BuildContext context) {
     // Kick off WebSocket signaling connection so we can receive incoming calls.
-    final call = ref.watch(callStateProvider);
+    ref.watch(callStateProvider);
     final currentCount = ref.watch(callCountProvider);
 
     // Refresh history when call count changes (a call ended).
@@ -69,7 +69,7 @@ class _DialerScreenState extends ConsumerState<DialerScreen> with WidgetsBinding
                 children: [
                   _ActionButton(icon: Icons.contacts, label: 'Contacts', onTap: () => context.push('/contacts')),
                   _ActionButton(icon: Icons.dialpad, label: 'Keypad', onTap: () => context.push('/keypad')),
-                  _ActionButton(icon: Icons.history, label: 'Recent', onTap: () {}),
+                  _ActionButton(icon: Icons.message, label: 'Messages', onTap: () => context.push('/conversations')),
                   _ActionButton(icon: Icons.settings, label: 'Settings', onTap: () => context.push('/settings')),
                 ],
               ),
