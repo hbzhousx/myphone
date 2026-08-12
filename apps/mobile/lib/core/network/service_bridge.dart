@@ -22,12 +22,18 @@ import 'signaling_client.dart';
 
 /// 按平台 + 常驻开关选择信令传输实现。
 /// 常驻开关在 [ResidentService.enabled]，由设置页持久化。
+///
+/// ★进程内 WS 必须单例：callStateProvider 与 chatStateProvider 都调用本函数。
+/// 若不缓存，DirectWS 模式会建出两个独立 WebSocket → 服务器 register 时新连接
+/// 覆盖旧连接并互踢 → 客户端反复重连 → 呼叫信令目标"不在线"导致呼叫不通。
 SignalingClient createSignalingClient() {
-  if (Platform.isAndroid && ResidentService.enabled) {
-    return ServiceBridgeSignalingClient();
-  }
-  return DirectWSSignalingClient();
+  _signalingSingleton ??= (Platform.isAndroid && ResidentService.enabled)
+      ? ServiceBridgeSignalingClient()
+      : DirectWSSignalingClient();
+  return _signalingSingleton!;
 }
+
+SignalingClient? _signalingSingleton;
 
 /// 常驻服务生命周期（登录成功 / 进入拨号盘时调用，幂等）。
 class ResidentService {
