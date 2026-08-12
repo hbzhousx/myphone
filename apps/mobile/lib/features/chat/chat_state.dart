@@ -108,8 +108,8 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
       case ChatSignalType.chatFileAnswer:
       case ChatSignalType.chatFileIce:
       case ChatSignalType.chatFileDone:
-        // Phase E 文件传输处理。
-        await _routeToConversation(signal);
+        // 数据通道文件信令：路由到对应会话的控制器。
+        await _routeFileSignal(signal);
         break;
     }
   }
@@ -131,6 +131,30 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
         break;
       case ChatSignalType.chatDisappearing:
         await controller.handleDisappearing(signal);
+        break;
+      default:
+        break;
+    }
+  }
+
+  /// 路由数据通道文件信令（chatFileOffer/Answer/Ice/Done）到对应会话。
+  Future<void> _routeFileSignal(ChatSignal signal) async {
+    final remoteUserId = signal.fromUserId;
+    var conv = await _db.getConversationByRemote(remoteUserId);
+    final conversationId = conv?['id'] as String? ?? 'conv-$remoteUserId';
+
+    final controller = controllerFor(
+      remoteUserId: remoteUserId,
+      conversationId: conversationId,
+    );
+
+    switch (signal.type) {
+      case ChatSignalType.chatFileOffer:
+        await controller.handleFileOffer(signal);
+        break;
+      case ChatSignalType.chatFileAnswer:
+      case ChatSignalType.chatFileIce:
+        await controller.handleFileSignal(signal);
         break;
       default:
         break;

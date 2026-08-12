@@ -1,8 +1,10 @@
 /// WebRTC DataChannel 点对点文件/图片/视频传输。
 ///
 /// 文件字节只经数据通道在双方客户端间直传，服务器只中继 offer/answer/ICE 信令，
-/// 绝不见文件内容。文件以逐文件随机 AES-256-GCM 密钥加密，密钥经棘轮加密的
-/// chatMessage 端到端送达对端。发送方/接收方各自把密文存 app 私有目录。
+/// 绝不见文件内容。文件以逐文件随机 AES-256-GCM 密钥加密：发送方加密源文件后
+/// 传密文分块，接收方收密文后解密写盘。密钥经棘轮加密的 chatMessage 端到端送达。
+///
+/// 密文/明文均存 app 私有目录（chat_media/<conversationId>/），服务器不接触。
 library;
 
 import 'dart:async';
@@ -11,15 +13,21 @@ import 'dart:typed_data';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 
+import '../../core/crypto/crypto_manager.dart';
 import '../../core/webrtc/ice_policy.dart';
 import '../../core/webrtc/webrtc_manager.dart';
 
 /// 数据通道背压阈值。
 const int _bufferedAmountLow = 64 * 1024;
 
+/// 传输状态回调值。
+const String kTransferring = 'transferring';
+const String kDone = 'done';
+const String kFailed = 'failed';
+
 class ChatFileTransfer {
   final String transferId;
-  final String filePath; // 源文件（发送）或密文文件（接收）
+  final String filePath; // 发送：明文源文件；接收：解密后的明文展示文件
   final int totalBytes;
   final String fileName;
   final String mimeType;
@@ -41,7 +49,7 @@ class ChatFileTransferManager {
   final void Function(ChatFileTransfer transfer, double progress, String status)?
       onProgress;
 
-  /// 把聊天信令发到 WS 的回调（type ∈ chatFileOffer/Answer/Ice/Done）。
+  /// 把聊天信令发到 WS 的回调（type ∈ chatFileOffer/Answer/Ice）。
   final void Function(String type, Map<String, dynamic> payload)? onSignal;
 
   rtc.RTCPeerConnection? _pc;
@@ -49,23 +57,56 @@ class ChatFileTransferManager {
   ChatFileTransfer? _current;
   Timer? _idleTimer;
   bool _isSender = false;
-  final List<int> _receiveBuffer = [];
+
+  // 接收侧暂存：目标明文路径 + AES 密钥 + 密文分块。
+  String? _receivePlainPath;
+  Uint8List? _receiveAesKey;
+  final List<int> _receivedCiphertext = [];
 
   ChatFileTransferManager({this.onProgress, this.onSignal});
 
-  /// 发送侧：初始化数据通道连接并发出 offer。
+  /// 发送侧：加密源文件 → 建数据通道 → 发 offer。
+  /// [aesKey] 逐文件随机 AES-256-GCM 密钥（32B），[encPath] 本地密文路径。
+  /// 传输结束后删除 [encPath] 与源文件临时副本。
   Future<void> sendFile({
     required String transferId,
     required String filePath,
     required String fileName,
     required String mimeType,
+    required Uint8List aesKey,
+    required String encPath,
   }) async {
     final file = File(filePath);
-    final size = await file.length();
+
+    // 加密源文件到本地密文（流式分块）。块格式：[4B len][nonce(12)][ciphertext||mac]，
+    // 接收方按长度逐块解析，与发送方 chunk 大小无关。
+    final encFile = File(encPath);
+    await encFile.parent.create(recursive: true);
+    final sink = encFile.openWrite();
+    final source = file.openRead();
+    await for (final chunk in source) {
+      final nonce = CryptoManager.randomNonce12();
+      final enc = await CryptoManager.aesGcmEncrypt(
+        chunk,
+        key: aesKey,
+        nonce: nonce,
+        aad: Uint8List.fromList('myphone-file-v1'.codeUnits),
+      );
+      final len = enc.length;
+      final framed = Uint8List(4 + len)
+        ..[0] = (len >> 24) & 0xFF
+        ..[1] = (len >> 16) & 0xFF
+        ..[2] = (len >> 8) & 0xFF
+        ..[3] = len & 0xFF
+        ..setRange(4, 4 + len, enc);
+      sink.add(framed);
+    }
+    await sink.close();
+
     _current = ChatFileTransfer(
       transferId: transferId,
-      filePath: filePath,
-      totalBytes: size,
+      filePath: encPath, // 数据通道传的是密文文件
+      totalBytes: await encFile.length(),
       fileName: fileName,
       mimeType: mimeType,
     );
@@ -86,20 +127,25 @@ class ChatFileTransferManager {
   }
 
   /// 接收侧：处理入站 offer，回 answer。
+  /// [filePath] 解密后明文的落盘路径，[aesKey] 从棘轮加密的 chatMessage 里取出。
   Future<void> handleOffer({
     required String transferId,
     required String sdp,
     required String fileName,
     required int totalBytes,
     required String mimeType,
+    required String filePath,
+    required Uint8List aesKey,
   }) async {
     _current = ChatFileTransfer(
       transferId: transferId,
-      filePath: '',
+      filePath: filePath,
       totalBytes: totalBytes,
       fileName: fileName,
       mimeType: mimeType,
     );
+    _receivePlainPath = filePath;
+    _receiveAesKey = aesKey;
     _isSender = false;
 
     final pc = await _createPeerConnection();
@@ -155,7 +201,7 @@ class ChatFileTransferManager {
     pc.onConnectionState = (state) {
       if (state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
         if (_current != null) {
-          onProgress?.call(_current!, 0, 'failed');
+          onProgress?.call(_current!, 0, kFailed);
         }
         _teardown();
       }
@@ -172,7 +218,7 @@ class ChatFileTransferManager {
           _sendFileStream();
         }
       } else if (state == rtc.RTCDataChannelState.RTCDataChannelClosed) {
-        if (!_isSender) _writeReceivedFile();
+        if (!_isSender) _finishReceive();
         _teardown();
       }
     });
@@ -184,50 +230,83 @@ class ChatFileTransferManager {
     });
   }
 
+  /// 发送密文分块（带 4B 长度头，结尾空帧标记）。
   Future<void> _sendFileStream() async {
     final file = File(_current!.filePath);
     final length = _current!.totalBytes;
     var sent = 0;
     final stream = file.openRead();
-    await for (final chunk in stream) {
-      while (_dc != null &&
-          (_dc!.bufferedAmount ?? 0) > _bufferedAmountLow) {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+    try {
+      await for (final chunk in stream) {
+        while (_dc != null &&
+            (_dc!.bufferedAmount ?? 0) > _bufferedAmountLow) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+        final len = chunk.length;
+        final frame = Uint8List(4 + len);
+        frame[0] = (len >> 24) & 0xFF;
+        frame[1] = (len >> 16) & 0xFF;
+        frame[2] = (len >> 8) & 0xFF;
+        frame[3] = len & 0xFF;
+        frame.setRange(4, 4 + len, chunk);
+        _dc?.send(rtc.RTCDataChannelMessage.fromBinary(frame));
+        sent += len;
+        _current!.transferredBytes = sent;
+        onProgress?.call(_current!, sent / length, kTransferring);
       }
-      final len = chunk.length;
-      final frame = Uint8List(4 + len);
-      frame[0] = (len >> 24) & 0xFF;
-      frame[1] = (len >> 16) & 0xFF;
-      frame[2] = (len >> 8) & 0xFF;
-      frame[3] = len & 0xFF;
-      frame.setRange(4, 4 + len, chunk);
-      _dc?.send(rtc.RTCDataChannelMessage.fromBinary(frame));
-      sent += len;
-      _current!.transferredBytes = sent;
-      onProgress?.call(_current!, sent / length, 'transferring');
-    }
-    // 结束标记（空帧）。
-    if (_dc != null) {
-      _dc!.send(rtc.RTCDataChannelMessage.fromBinary(Uint8List(0)));
-      onProgress?.call(_current!, 1.0, 'done');
+      // 结束标记（空帧）。
+      if (_dc != null) {
+        _dc!.send(rtc.RTCDataChannelMessage.fromBinary(Uint8List(0)));
+        onProgress?.call(_current!, 1.0, kDone);
+      }
+    } catch (e) {
+      if (_current != null) onProgress?.call(_current!, 0, kFailed);
     }
   }
 
   void _receiveChunk(Uint8List data) {
+    // 空帧 = 传输结束。
     if (data.length == 4 && data.every((b) => b == 0)) {
-      _writeReceivedFile();
+      _finishReceive();
       return;
     }
-    _receiveBuffer.addAll(data);
+    _receivedCiphertext.addAll(data);
   }
 
-  Future<void> _writeReceivedFile() async {
-    if (_current == null || _current!.filePath.isEmpty) return;
-    final file = File(_current!.filePath);
-    await file.parent.create(recursive: true);
-    await file.writeAsBytes(Uint8List.fromList(_receiveBuffer));
-    onProgress?.call(_current!, 1.0, 'done');
-    _teardown();
+  /// 接收完成：按 `[4B len][密文块]` 逐块解析并解密写盘。
+  Future<void> _finishReceive() async {
+    final plainPath = _receivePlainPath;
+    final aesKey = _receiveAesKey;
+    if (_current == null || plainPath == null || aesKey == null) return;
+    try {
+      final plainFile = File(plainPath);
+      await plainFile.parent.create(recursive: true);
+      final ciphertext = Uint8List.fromList(_receivedCiphertext);
+
+      final sink = plainFile.openWrite();
+      var off = 0;
+      while (off + 4 <= ciphertext.length) {
+        final len = (ciphertext[off] << 24) |
+            (ciphertext[off + 1] << 16) |
+            (ciphertext[off + 2] << 8) |
+            ciphertext[off + 3];
+        if (off + 4 + len > ciphertext.length) break; // 不完整块，丢弃尾部
+        final block = Uint8List.sublistView(ciphertext, off + 4, off + 4 + len);
+        final dec = await CryptoManager.aesGcmDecrypt(
+          block,
+          key: aesKey,
+          nonceLength: 12,
+          aad: Uint8List.fromList('myphone-file-v1'.codeUnits),
+        );
+        sink.add(dec);
+        off += 4 + len;
+      }
+      await sink.close();
+
+      if (_current != null) onProgress?.call(_current!, 1.0, kDone);
+    } catch (e) {
+      if (_current != null) onProgress?.call(_current!, 0, kFailed);
+    }
   }
 
   void _teardown() {
@@ -239,7 +318,9 @@ class ChatFileTransferManager {
     _pc?.close();
     _pc = null;
     _current = null;
-    _receiveBuffer.clear();
+    _receivePlainPath = null;
+    _receiveAesKey = null;
+    _receivedCiphertext.clear();
   }
 
   void dispose() {

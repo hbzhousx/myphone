@@ -2,12 +2,19 @@
 library;
 
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:path_provider/path_provider.dart';
 
 import '../../core/crypto/chat_ratchet.dart';
 import '../../core/crypto/chat_session_manager.dart';
+import '../../core/crypto/crypto_manager.dart';
 import '../../core/network/chat_signal.dart';
 import '../../core/network/signaling_client.dart';
 import '../../core/storage/database.dart';
+import 'chat_file_transfer_manager.dart';
 
 class ChatSessionController {
   final DatabaseManager _db;
@@ -16,6 +23,8 @@ class ChatSessionController {
   final String _localUserId;
   final String _remoteUserId;
   final String _conversationId;
+
+  ChatFileTransferManager? _fileManager;
 
   ChatSessionController({
     required DatabaseManager db,
@@ -30,6 +39,19 @@ class ChatSessionController {
         _localUserId = localUserId,
         _remoteUserId = remoteUserId,
         _conversationId = conversationId;
+
+  /// 懒建数据通道文件传输管理器（每个会话一个）。
+  ChatFileTransferManager get fileManager => _fileManager ??= ChatFileTransferManager(
+        onSignal: (type, payload) {
+          _signaling.sendChatSignal(ChatSignal(
+            type: ChatSignalType.values.firstWhere((e) => e.name == type),
+            fromUserId: _localUserId,
+            toUserId: _remoteUserId,
+            payload: {...payload, 'conversation_id': _conversationId},
+          ));
+        },
+        onProgress: _onFileProgress,
+      );
 
   /// 发送文本/表情消息。
   Future<Map<String, dynamic>?> sendText(
@@ -161,6 +183,8 @@ class ChatSessionController {
     final body = parsed['body'] as String? ?? '';
     final expiresIn = (payload['expires_in_seconds'] as num?)?.toInt() ?? 0;
 
+    // 附件元数据消息（含 transfer_id）：落附件表，等数据通道到达。
+    final isFile = parsed.containsKey('transfer_id');
     final now = DateTime.now().millisecondsSinceEpoch;
     await _db.insertMessage({
       'id': messageId,
@@ -168,12 +192,32 @@ class ChatSessionController {
       'direction': 'incoming',
       'kind': kind,
       'body': body,
-      'status': 'delivered',
+      'status': isFile ? 'pending' : 'delivered',
       'expires_in_seconds': expiresIn,
       'expires_at': expiresIn > 0 ? now + expiresIn * 1000 : null,
       'received_at': now,
       'created_at': now,
     });
+
+    if (isFile) {
+      // 附件元数据：存 per-file AES key + 明文落盘路径，供 chatFileOffer 使用。
+      final transferId = parsed['transfer_id'] as String? ?? messageId;
+      final dir = await getApplicationDocumentsDirectory();
+      final plainPath = '${dir.path}/chat_media/$_conversationId/$messageId';
+      await _db.insertAttachment({
+        'id': transferId,
+        'message_id': messageId,
+        'conversation_id': _conversationId,
+        'kind': kind,
+        'file_name': parsed['file_name'] as String? ?? body,
+        'mime_type': parsed['mime_type'] as String? ?? 'application/octet-stream',
+        'size_bytes': (parsed['size_bytes'] as num?)?.toInt() ?? 0,
+        'plaintext_sha256': parsed['plaintext_sha256'] as String?,
+        'local_plain_path': plainPath,
+        'aes_key': base64Decode(parsed['aes_key'] as String? ?? ''),
+        'status': 'pending',
+      });
+    }
     await _touchConversation(body, messageId);
 
     // 回执：delivered（已读回执由 UI 显式触发 markRead）。
@@ -259,5 +303,177 @@ class ChatSessionController {
   String _newId() {
     final rnd = DateTime.now().microsecondsSinceEpoch;
     return 'msg-$rnd-${DateTime.now().millisecondsSinceEpoch % 100000}';
+  }
+
+  // ---- 附件（图片/文件）发送与接收 ----
+
+  /// 发送图片/文件：加密源文件 → 棘轮加密元数据 chatMessage → 数据通道传输。
+  /// [filePath] 本地源文件，[kind] image/file/video。
+  Future<Map<String, dynamic>?> sendFile({
+    required String filePath,
+    required String kind, // image / file / video
+    required String fileName,
+    required String mimeType,
+    int expiresInSeconds = 0,
+  }) async {
+    final src = File(filePath);
+    if (!await src.exists()) return {'error': 'file not found'};
+
+    var session = await _sessions.loadSession(_conversationId);
+    if (session == null) {
+      try {
+        session = await _sessions.establishAsInitiator(
+          remoteUserId: _remoteUserId,
+          conversationId: _conversationId,
+        );
+      } catch (e) {
+        return {'error': 'no session: $e'};
+      }
+    }
+
+    final messageId = _newId();
+    final transferId = messageId; // 附件与消息共用 id
+    final aesKey = CryptoManager.randomBytes(32);
+    final dir = await getApplicationDocumentsDirectory();
+    final encPath =
+        '${dir.path}/chat_media/$_conversationId/$messageId.enc';
+    final plaintextSha = await _sha256File(src);
+
+    // 1) 棘轮加密元数据（不含文件字节，只含定位 + 密钥）。
+    final meta = {
+      'kind': kind,
+      'body': fileName,
+      'transfer_id': transferId,
+      'file_name': fileName,
+      'mime_type': mimeType,
+      'size_bytes': await src.length(),
+      'plaintext_sha256': plaintextSha,
+      'aes_key': base64Encode(aesKey),
+    };
+    final aad = ChatRatchet.associatedData(
+      senderUserId: _localUserId,
+      recipientUserId: _remoteUserId,
+      conversationId: _conversationId,
+    );
+    final enc = await ChatRatchet.encrypt(session, utf8.encode(jsonEncode(meta)), aad: aad);
+    await _sessions.saveSession(_conversationId, enc.session);
+
+    // 2) 发送元数据 chatMessage（密文里只有元数据，无文件内容）。
+    _signaling.sendChatSignal(ChatSignal(
+      type: ChatSignalType.chatMessage,
+      fromUserId: _localUserId,
+      toUserId: _remoteUserId,
+      messageId: messageId,
+      payload: {
+        'message_id': messageId,
+        'ciphertext': base64Encode(enc.frame.toBytes()),
+        'expires_in_seconds': expiresInSeconds,
+      },
+    ));
+
+    // 3) 本地落一条附件消息（transferring 状态）。
+    await _db.insertMessage({
+      'id': messageId,
+      'conversation_id': _conversationId,
+      'direction': 'outgoing',
+      'kind': kind,
+      'body': fileName,
+      'status': 'transferring',
+      'expires_in_seconds': expiresInSeconds,
+      'transfer_id': transferId,
+      'sent_at': DateTime.now().millisecondsSinceEpoch,
+    });
+    await _db.insertAttachment({
+      'id': transferId,
+      'message_id': messageId,
+      'conversation_id': _conversationId,
+      'kind': kind,
+      'file_name': fileName,
+      'mime_type': mimeType,
+      'size_bytes': await src.length(),
+      'plaintext_sha256': plaintextSha,
+      'local_enc_path': encPath,
+      'local_plain_path': filePath,
+      'aes_key': aesKey,
+      'status': 'pending',
+    });
+    await _touchConversation(fileName, messageId);
+
+    // 4) 启动数据通道传输（密文，服务器不见字节）。
+    fileManager.sendFile(
+      transferId: transferId,
+      filePath: filePath,
+      fileName: fileName,
+      mimeType: mimeType,
+      aesKey: aesKey,
+      encPath: encPath,
+    );
+
+    return {'message_id': messageId};
+  }
+
+  /// 处理入站 chatFileOffer（接收方回 answer）。
+  Future<void> handleFileOffer(ChatSignal signal) async {
+    final payload = signal.payload ?? const {};
+    final transferId = payload['transfer_id'] as String?;
+    final sdp = payload['sdp'] as String?;
+    if (transferId == null || sdp == null) return;
+
+    final attach = await _db.getAttachment(transferId);
+    if (attach == null) return;
+    final aesKey = attach['aes_key'] as List<int>?;
+    if (aesKey == null) return;
+
+    await _db.updateAttachmentStatus(transferId, 'transferring');
+    await _db.updateMessageStatus(transferId, 'transferring');
+
+    final dir = await getApplicationDocumentsDirectory();
+    final plainPath = attach['local_plain_path'] as String? ??
+        '${dir.path}/chat_media/$_conversationId/$transferId';
+
+    await fileManager.handleOffer(
+      transferId: transferId,
+      sdp: sdp,
+      fileName: attach['file_name'] as String? ?? 'file',
+      totalBytes: (attach['size_bytes'] as num?)?.toInt() ?? 0,
+      mimeType: attach['mime_type'] as String? ?? 'application/octet-stream',
+      filePath: plainPath,
+      aesKey: Uint8List.fromList(aesKey),
+    );
+  }
+
+  /// 处理入站 chatFileAnswer / chatFileIce（发送方侧）。
+  Future<void> handleFileSignal(ChatSignal signal) async {
+    final payload = signal.payload ?? const {};
+    final sdp = payload['sdp'] as String?;
+    if (signal.type == ChatSignalType.chatFileAnswer && sdp != null) {
+      await fileManager.handleAnswer(
+        payload['transfer_id'] as String? ?? '',
+        sdp,
+      );
+    } else if (signal.type == ChatSignalType.chatFileIce) {
+      await fileManager.handleIceCandidate(
+        payload['transfer_id'] as String? ?? '',
+        payload,
+      );
+    }
+  }
+
+  /// 数据通道进度回调：传输完成/失败时更新消息状态。
+  Future<void> _onFileProgress(
+      ChatFileTransfer transfer, double progress, String status) async {
+    final messageId = transfer.transferId;
+    if (status == kDone) {
+      await _db.updateMessageStatus(messageId, 'delivered');
+      await _db.updateAttachmentStatus(messageId, 'done');
+    } else if (status == kFailed) {
+      await _db.updateMessageStatus(messageId, 'failed');
+      await _db.updateAttachmentStatus(messageId, 'failed');
+    }
+  }
+
+  Future<String> _sha256File(File file) async {
+    final bytes = await file.readAsBytes();
+    return crypto.sha256.convert(bytes).toString();
   }
 }

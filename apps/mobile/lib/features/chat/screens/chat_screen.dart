@@ -2,9 +2,15 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:mime/mime.dart';
+import 'package:path/path.dart' as p;
+
 import '../../../core/storage/database.dart';
 import '../chat_state.dart';
 import '../widgets/message_bubble.dart';
@@ -26,6 +32,9 @@ class ChatScreen extends ConsumerStatefulWidget {
   @override
   ConsumerState<ChatScreen> createState() => _ChatScreenState();
 }
+
+/// 附件来源。
+enum _AttachSource { gallery, camera, file }
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _inputController = TextEditingController();
@@ -75,8 +84,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final rows = await DatabaseManager.instance
           .getMessages(_conversationId, limit: 200);
       if (!mounted) return;
+      // 为附件消息补本地明文路径（供图片缩略图/文件卡片展示）。
+      final withPaths = <Map<String, dynamic>>[];
+      for (final msg in rows) {
+        final transferId = msg['transfer_id'] as String?;
+        if (transferId != null) {
+          final attach =
+              await DatabaseManager.instance.getAttachment(transferId);
+          msg['_attachment_path'] = attach?['local_plain_path'] as String?;
+        }
+        withPaths.add(msg);
+      }
       setState(() {
-        _messages = rows;
+        _messages = withPaths;
         _loading = false;
       });
       _maybeReadIncoming(rows);
@@ -169,13 +189,156 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  /// 附件来源选择：图库 / 相机 / 文件。
   Future<void> _pickAndSendFile() async {
-    // v0.5 简化：文件/图片传输暂以占位提示，不接数据通道完整流程。
-    // 数据链路（ChatFileTransferManager）已就绪，后续可在此接入。
+    if (!mounted) return;
+    final source = await showModalBottomSheet<_AttachSource>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('从图库选择图片'),
+              onTap: () => Navigator.pop(ctx, _AttachSource.gallery),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('拍照'),
+              onTap: () => Navigator.pop(ctx, _AttachSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.insert_drive_file_outlined),
+              title: const Text('发送文件'),
+              onTap: () => Navigator.pop(ctx, _AttachSource.file),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (source == null || !mounted) return;
+
+    switch (source) {
+      case _AttachSource.gallery:
+        await _sendImage(ImageSource.gallery);
+      case _AttachSource.camera:
+        await _sendImage(ImageSource.camera);
+      case _AttachSource.file:
+        await _sendFilePicker();
+    }
+  }
+
+  /// 选图片/拍照发送。
+  Future<void> _sendImage(ImageSource source) async {
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: source,
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 85,
+      );
+      if (picked == null || !mounted) return;
+      final file = File(picked.path);
+      final name = picked.name.isNotEmpty ? picked.name : p.basename(picked.path);
+      final mime = lookupMimeType(picked.path) ?? 'image/jpeg';
+      final result = await ref
+          .read(chatStateProvider.notifier)
+          .controllerFor(
+            remoteUserId: widget.contactId,
+            conversationId: _conversationId,
+          )
+          .sendFile(
+            filePath: file.path,
+            kind: 'image',
+            fileName: name,
+            mimeType: mime,
+            expiresInSeconds: _disappearSeconds,
+          );
+      if (result != null && result.containsKey('error')) {
+        _showSendError(result['error'].toString());
+      }
+      await _loadMessages();
+    } catch (e) {
+      debugPrint('[CHAT] pick image failed: $e');
+    }
+  }
+
+  /// 选任意文件发送。
+  Future<void> _sendFilePicker() async {
+    try {
+      final picked = await FilePicker.platform.pickFiles();
+      if (picked == null || picked.files.isEmpty || !mounted) return;
+      final f = picked.files.first;
+      final path = f.path;
+      if (path == null) {
+        _showSendError('无法读取所选文件');
+        return;
+      }
+      final name = f.name.isNotEmpty ? f.name : p.basename(path);
+      final mime = f.extension != null
+          ? lookupMimeType(name)
+          : (lookupMimeType(name) ?? 'application/octet-stream');
+      final result = await ref
+          .read(chatStateProvider.notifier)
+          .controllerFor(
+            remoteUserId: widget.contactId,
+            conversationId: _conversationId,
+          )
+          .sendFile(
+            filePath: path,
+            kind: mime != null && mime.startsWith('video/') ? 'video' : 'file',
+            fileName: name,
+            mimeType: mime ?? 'application/octet-stream',
+            expiresInSeconds: _disappearSeconds,
+          );
+      if (result != null && result.containsKey('error')) {
+        _showSendError(result['error'].toString());
+      }
+      await _loadMessages();
+    } catch (e) {
+      debugPrint('[CHAT] pick file failed: $e');
+      _showSendError('选择文件失败');
+    }
+  }
+
+  void _showSendError(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('文件传输即将上线')),
+      SnackBar(content: Text('发送失败：$message')),
     );
+  }
+
+  /// 打开已接收的文件/图片（本地解密后路径）。
+  Future<void> _openAttachment(String transferId) async {
+    try {
+      final attach = await DatabaseManager.instance.getAttachment(transferId);
+      if (attach == null) return;
+      final path = attach['local_plain_path'] as String?;
+      if (path == null || !File(path).existsSync()) {
+        _showSendError('文件尚未到达');
+        return;
+      }
+      if (!mounted) return;
+      // 图片/视频预览大图，文件用系统分享。
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => Dialog(
+          child: InteractiveViewer(
+            child: Image.file(
+              File(path),
+              fit: BoxFit.contain,
+              errorBuilder: (_, __, ___) => const SizedBox(
+                height: 120,
+                child: Center(child: Text('无法预览')),
+              ),
+            ),
+          ),
+        ),
+      );
+    } catch (e) {
+      debugPrint('[CHAT] open attachment failed: $e');
+    }
   }
 
   @override
@@ -222,12 +385,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                           final msg = _messages[_messages.length - 1 - index];
                           final outgoing =
                               msg['direction'] == 'outgoing';
+                          final kind = msg['kind'] as String? ?? 'text';
+                          final transferId = msg['transfer_id'] as String?;
                           return MessageBubble(
                             text: msg['body'] as String? ?? '',
-                            kind: msg['kind'] as String? ?? 'text',
+                            kind: kind,
                             isOutgoing: outgoing,
                             status: msg['status'] as String?,
                             timestamp: (msg['created_at'] as num?)?.toInt(),
+                            transferId: transferId,
+                            attachmentPath: msg['_attachment_path'] as String?,
+                            onAttachmentTap: transferId != null
+                                ? () => _openAttachment(transferId)
+                                : null,
                           );
                         },
                       ),
