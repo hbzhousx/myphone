@@ -88,6 +88,71 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
         .join();
   }
 
+  /// 发起新聊天：弹联系人选择，选中后进入聊天页（会话懒创建）。
+  Future<void> _startNewChat() async {
+    if (!mounted) return;
+    final contacts = await _loadContacts();
+    if (!mounted) return;
+
+    if (contacts.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('暂无联系人，请先到通讯录添加')),
+      );
+      return;
+    }
+
+    final selected = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('选择联系人', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+            const Divider(height: 1),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: contacts.length,
+                itemBuilder: (ctx, i) {
+                  final c = contacts[i];
+                  final name = (c['display_name'] as String?) ?? '';
+                  return ListTile(
+                    leading: CircleAvatar(child: Text(_initialsOf(name))),
+                    title: Text(name,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    onTap: () => Navigator.pop(ctx, c),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (selected != null && mounted) {
+      final contactId = selected['id'] as String;
+      // 预建会话（remote_user_id = 联系人 id），确保消息页有会话。
+      await DatabaseManager.instance.upsertConversation({
+        'id': 'conv-$contactId',
+        'remote_user_id': contactId,
+        'remote_display_name': (selected['display_name'] as String?) ?? '',
+      });
+      if (mounted) context.push('/chat/$contactId');
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _loadContacts() async {
+    try {
+      return await DatabaseManager.instance.getContacts();
+    } catch (_) {
+      return [];
+    }
+  }
+
   String _relativeTime(int? ms) {
     if (ms == null) return '';
     final dt = DateTime.fromMillisecondsSinceEpoch(ms);
@@ -108,6 +173,11 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('消息')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _startNewChat,
+        icon: const Icon(Icons.chat_bubble_outline),
+        label: const Text('发起聊天'),
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _conversations.isEmpty

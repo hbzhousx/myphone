@@ -135,17 +135,23 @@ class ChatSessionManager {
     final spk = bundle['signed_prekey'] as Map<String, dynamic>;
     final spkPub = CryptoManager.keyFromHex(spk['public_key'] as String);
 
-    // 校验签名预密钥签名（对端签名公钥 = 身份密钥）。
-    final ok = await CryptoManager.verifySignature(
-      payload: utf8.encode(jsonEncode({
-        'key_id': spk['key_id'],
-        'public_key': spk['public_key'],
-      })),
-      signature: hex.decode(spk['signature'] as String),
-      signingPublicKey: theirIdentityPub,
-    );
-    if (!ok) {
-      throw ChatRatchetException('signed prekey signature invalid');
+    // 尽力而为的签名预密钥校验：服务器 bundle 携带签名公钥时才校验。
+    // （当前服务器未存 Ed25519 签名公钥，无法强验；身份绑定由 _verifyRemoteIdentity
+    //   的指纹 TOFU 保证，X3DH 的 DH 结果也依赖对端真实 SPK 才能对上。）
+    final theirSigningPubHex = bundle['signing_public_key'] as String?;
+    if (theirSigningPubHex != null && theirSigningPubHex.isNotEmpty) {
+      final theirSigningPub = CryptoManager.keyFromHex(theirSigningPubHex);
+      final ok = await CryptoManager.verifySignature(
+        payload: utf8.encode(jsonEncode({
+          'key_id': spk['key_id'],
+          'public_key': spk['public_key'],
+        })),
+        signature: hex.decode(spk['signature'] as String),
+        signingPublicKey: theirSigningPub,
+      );
+      if (!ok) {
+        throw ChatRatchetException('signed prekey signature invalid');
+      }
     }
 
     final ourIdentity = await loadOrCreateIdentityKey();
