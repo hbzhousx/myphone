@@ -399,14 +399,14 @@ class ChatSessionController {
       },
     ));
 
-    // 3) 本地落一条附件消息（transferring 状态）。
+    // 3) 本地落一条附件消息（pending 状态，messages 表 CHECK 不支持 'transferring'）。
     await _db.insertMessage({
       'id': messageId,
       'conversation_id': _conversationId,
       'direction': 'outgoing',
       'kind': kind,
       'body': fileName,
-      'status': 'transferring',
+      'status': 'pending',
       'expires_in_seconds': expiresInSeconds,
       'transfer_id': transferId,
       'sent_at': DateTime.now().millisecondsSinceEpoch,
@@ -453,7 +453,7 @@ class ChatSessionController {
     if (aesKey == null) return;
 
     await _db.updateAttachmentStatus(transferId, 'transferring');
-    await _db.updateMessageStatus(transferId, 'transferring');
+    await _db.updateMessageStatus(transferId, 'pending');
 
     final dir = await getApplicationDocumentsDirectory();
     final plainPath = attach['local_plain_path'] as String? ??

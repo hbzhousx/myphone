@@ -70,13 +70,47 @@ class ChatSessionManager {
   // ---- prekey bundle 发布 ----
 
   /// 生成并上传签名预密钥 + 一批一次性预密钥（幂等）。
+  /// ★SPK 必须复用：若本地已有则沿用，避免每次登录重新生成导致「发起方 bundle 的
+  ///    SPK 公钥」与「响应方本地 SPK 私钥」不同步 → X3DH 不匹配 → 首条消息解密失败。
   Future<void> publishPrekeyBundle() async {
     final signingKey = await loadOrCreateSigningKey();
 
-    // 签名预密钥。
-    final signedPreKey = await CryptoManager.generateSignedPreKey();
-    final spkPub = await signedPreKey.keyPair.extractPublicKey();
-    final keyId = (DateTime.now().millisecondsSinceEpoch & 0x7fffffff);
+    // 签名预密钥：优先复用本地已有（含私钥），仅首次生成。
+    SimpleKeyPairData spkPair;
+    int keyId;
+    final existingPriv = await _db.getKey('chat_spk_private');
+    final existingPub = await _db.getKey('chat_spk_public');
+    final existingId = await _db.getKey('chat_spk_id');
+    if (existingPriv != null && existingPub != null) {
+      spkPair = CryptoManager.restoreX25519KeyPair(
+        privateKey: existingPriv,
+        publicKey: existingPub,
+      );
+      keyId = existingId != null
+          ? (existingId[0] |
+              (existingId[1] << 8) |
+              (existingId[2] << 16) |
+              (existingId[3] << 24))
+          : (DateTime.now().millisecondsSinceEpoch & 0x7fffffff);
+    } else {
+      final newSpk = await CryptoManager.generateSignedPreKey();
+      final exported = await CryptoManager.exportKeyPair(newSpk.keyPair);
+      spkPair = CryptoManager.restoreX25519KeyPair(
+        privateKey: exported.privateKey,
+        publicKey: exported.publicKey,
+      );
+      keyId = (DateTime.now().millisecondsSinceEpoch & 0x7fffffff);
+      await _db.storeKey('chat_spk_private', exported.privateKey);
+      await _db.storeKey('chat_spk_public', exported.publicKey);
+      await _db.storeKey('chat_spk_id', [
+        keyId & 0xFF,
+        (keyId >> 8) & 0xFF,
+        (keyId >> 16) & 0xFF,
+        (keyId >> 24) & 0xFF,
+      ]);
+    }
+
+    final spkPub = await spkPair.extractPublicKey();
     final sigPayload = utf8.encode(jsonEncode({
       'key_id': keyId,
       'public_key': hex.encode(spkPub.bytes),
@@ -87,17 +121,6 @@ class ChatSessionManager {
       publicKey: hex.encode(spkPub.bytes),
       signature: hex.encode(signature),
     );
-
-    // 响应方复用的棘轮初始密钥 = 该签名预密钥（标准 Signal 模型）。
-    final spkExported = await CryptoManager.exportKeyPair(signedPreKey.keyPair);
-    await _db.storeKey('chat_spk_private', spkExported.privateKey);
-    await _db.storeKey('chat_spk_public', spkExported.publicKey);
-    await _db.storeKey('chat_spk_id', [
-      keyId & 0xFF,
-      (keyId >> 8) & 0xFF,
-      (keyId >> 16) & 0xFF,
-      (keyId >> 24) & 0xFF,
-    ]);
 
     // 一次性预密钥（不足即补传，幂等）。
     final countRow = await _db.getKey('${_identityKeyType}_prekey_count');
