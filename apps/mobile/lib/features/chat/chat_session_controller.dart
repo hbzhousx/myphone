@@ -58,6 +58,7 @@ class ChatSessionController {
     String body, {
     int expiresInSeconds = 0,
   }) async {
+    await _ensureConversation();
     var session = await _sessions.loadSession(_conversationId);
     Map<String, dynamic>? initPayload;
     if (session == null) {
@@ -128,6 +129,7 @@ class ChatSessionController {
 
   /// 处理入站 chatMessage（解密、入库、回执、阅后即焚）。
   Future<void> handleIncoming(ChatSignal signal) async {
+    await _ensureConversation();
     final payload = signal.payload ?? const {};
     final messageId =
         payload['message_id'] as String? ?? signal.messageId ?? _newId();
@@ -298,6 +300,20 @@ class ChatSessionController {
     ));
   }
 
+  /// 确保 conversation 行存在（messages.conversation_id 有外键约束，
+  /// 若发送前无该行，insertMessage 会失败导致本机看不到消息）。
+  Future<void> _ensureConversation() async {
+    try {
+      final existing = await _db.getConversation(_conversationId);
+      if (existing == null) {
+        await _db.upsertConversation({
+          'id': _conversationId,
+          'remote_user_id': _remoteUserId,
+        });
+      }
+    } catch (_) {}
+  }
+
   Future<void> _touchConversation(String preview, String lastMessageId) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     // 保留已有 display_name：upsert 用 replace 会覆盖整行，若这里不带会清空名字。
@@ -349,6 +365,7 @@ class ChatSessionController {
     required String mimeType,
     int expiresInSeconds = 0,
   }) async {
+    await _ensureConversation();
     final src = File(filePath);
     if (!await src.exists()) return {'error': 'file not found'};
 

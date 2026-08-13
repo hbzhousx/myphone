@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/network/service_bridge.dart';
-import '../../../core/permission/permission_service.dart';
 import '../../../core/storage/database.dart';
 import '../../contacts/contact_manager.dart';
 import '../call_state.dart';
@@ -28,9 +27,6 @@ class _DialerScreenState extends ConsumerState<DialerScreen> with WidgetsBinding
     unawaited(ref.read(contactPresenceProvider.notifier).refresh());
     // v0.4: 拉起常驻前台服务（独占 WS 保持登录 + 来电唤醒）。幂等。
     unawaited(ResidentService.ensureStarted());
-    // v0.5: 启动时一次性申请全部权限（相机/存储/麦克风/通知），
-    // 避免发图/拍照/文件/拨号时才弹窗造成的权限割裂体验。
-    unawaited(PermissionService.requestAllOnStartup());
   }
 
   @override

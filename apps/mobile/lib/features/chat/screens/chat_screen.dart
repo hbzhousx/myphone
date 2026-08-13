@@ -12,6 +12,7 @@ import 'package:mime/mime.dart';
 import 'package:path/path.dart' as p;
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../../core/permission/permission_service.dart';
 import '../../../core/storage/database.dart';
 import '../chat_state.dart';
 import '../widgets/message_bubble.dart';
@@ -51,6 +52,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   void initState() {
     super.initState();
     ref.read(chatStateProvider.notifier).setActiveConversation(_conversationId);
+    // 首次进入聊天页引导授权（相机/存储/通知），避免发图时临时弹窗。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      PermissionService.ensureChatPermissions(context);
+    });
     _loadContact();
     _loadMessages();
     // 周期轮询：捕捉入站新消息/回执/阅后即焚（信令落库后在此刷新）。
@@ -233,12 +238,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// 选图片/拍照发送。
   Future<void> _sendImage(ImageSource source) async {
     try {
-      // 权限已在启动时统一申请，这里仅检查（未授权则提示去系统设置）。
-      final perm = source == ImageSource.camera
-          ? Permission.camera
-          : Permission.photos;
-      if (!await perm.isGranted) {
-        _showSendError('需要相机/存储权限，请在系统设置中允许');
+      // 图库走系统 Photo Picker（无需存储权限；vivo 的"仅可发送选择的内容"是
+      // Android 正常的 partial access，不是错误）。仅拍照需要相机权限。
+      if (source == ImageSource.camera &&
+          !await Permission.camera.isGranted) {
+        _showSendError('需要相机权限，请在系统设置中允许');
         return;
       }
       final picked = await ImagePicker().pickImage(
@@ -348,12 +352,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// 选任意文件发送。
   Future<void> _sendFilePicker() async {
     try {
-      // 权限已在启动时统一申请，这里仅检查（未授权则提示去系统设置）。
-      if (!await Permission.storage.isGranted &&
-          !await Permission.photos.isGranted) {
-        _showSendError('需要存储权限，请在系统设置中允许');
-        return;
-      }
+      // file_picker 走系统 SAF（Storage Access Framework），无需存储权限。
       final picked = await FilePicker.platform.pickFiles();
       if (picked == null || picked.files.isEmpty || !mounted) return;
       final f = picked.files.first;
