@@ -42,7 +42,8 @@ MYPHONE_TURN_USERNAME="${MYPHONE_TURN_USERNAME:-myphone}"
 MYPHONE_TURN_CREDENTIAL="${MYPHONE_TURN_CREDENTIAL:?未设置}"
 
 cd "$SCRIPT_DIR/../apps/mobile"
-flutter pub get
+# 优先离线解析（依赖已在 pub 缓存，避免联网获取安全通告因网络抖动失败）
+flutter pub get --offline || flutter pub get
 flutter build apk --release \
     --dart-define=MYPHONE_SERVER_HOST="$MYPHONE_SERVER_HOST" \
     --dart-define=MYPHONE_SERVER_PORT="$MYPHONE_SERVER_PORT" \
