@@ -12,7 +12,7 @@ import 'package:convert/convert.dart';
 
 import '../network/api_client.dart';
 import '../storage/database.dart';
-import 'chat_ratchet.dart';
+import 'chat_crypto.dart';
 import 'crypto_manager.dart';
 
 class ChatSessionManager {
@@ -177,7 +177,7 @@ class ChatSessionManager {
         signingPublicKey: theirSigningPub,
       );
       if (!ok) {
-        throw ChatRatchetException('signed prekey signature invalid');
+        throw ChatCryptoException('signed prekey signature invalid');
       }
     }
 
@@ -193,27 +193,10 @@ class ChatSessionManager {
           otp != null ? CryptoManager.keyFromHex(otp['public_key'] as String) : null,
     );
 
-    // 发起方棘轮：首链 = KDF_RK(root, DH(ourRatchet, SPKb))。
-    final ratchet = await CryptoManager.generateIdentityKeyPair();
-    final x = X25519();
-    final dh = await x.sharedSecretKey(keyPair: ratchet, remotePublicKey: spkPub);
-    final dhBytes = await dh.extractBytes();
-    final kdf = await CryptoManager.hkdf(
-      [...root, ...dhBytes],
-      'MyPhone-Chat-Root-v1',
-      64,
-    );
-
-    final extracted = await ratchet.extract();
-    final ratchetData = CryptoManager.restoreX25519KeyPair(
-      privateKey: await extracted.extractPrivateKeyBytes(),
-      publicKey: extracted.publicKey.bytes,
-    );
-
-    final session = await ChatRatchet.initiatorSession(
-      Uint8List.fromList(kdf.sublist(0, 32)),
-      ratchetData,
-      Uint8List.fromList(kdf.sublist(32, 64)),
+    // 简化方案：X3DH 的 root 直接作为会话密钥（复用语音思路，无双棘轮）。
+    final session = ChatCrypto.initSession(
+      root,
+      remoteIdentityPub: theirIdentityPub.bytes,
     );
     await _saveSession(conversationId, session, remoteUserId);
 
@@ -231,7 +214,7 @@ class ChatSessionManager {
   // ---- 响应方 X3DH ----
 
   /// 响应方建立会话（收到对端首个 chatMessage/chatInit 时调用）。
-  Future<ChatRatchetSession> establishAsResponder({
+  Future<ChatCryptoSession> establishAsResponder({
     required String remoteUserId,
     required String conversationId,
     required Map<String, dynamic> initPayload,
@@ -261,28 +244,36 @@ class ChatSessionManager {
       32,
     );
 
-    final session = await ChatRatchet.responderSession(root, ratchetKey: spkPair);
+    final session = ChatCrypto.initSession(
+      root,
+      remoteIdentityPub: theirIdentityPub.bytes,
+    );
     await _saveSession(conversationId, session, remoteUserId);
     return session;
   }
 
   // ---- 会话持久化 ----
 
-  Future<ChatRatchetSession?> loadSession(String conversationId) async {
+  Future<ChatCryptoSession?> loadSession(String conversationId) async {
     final json = await _db.getChatSessionJson(conversationId);
     if (json == null) return null;
-    return ChatRatchetSession.fromJson(jsonDecode(json) as Map<String, dynamic>);
+    try {
+      return ChatCryptoSession.fromJson(jsonDecode(json) as Map<String, dynamic>);
+    } catch (_) {
+      // 旧版双棘轮 JSON 或损坏行：视为无会话，下次发送会重新建立。
+      return null;
+    }
   }
 
-  Future<void> saveSession(String conversationId, ChatRatchetSession session) =>
+  Future<void> saveSession(String conversationId, ChatCryptoSession session) =>
       _saveSession(conversationId, session, null);
 
   Future<void> _saveSession(
     String conversationId,
-    ChatRatchetSession session,
+    ChatCryptoSession session,
     String? remoteUserId,
   ) async {
-    final json = jsonEncode(await session.toJson());
+    final json = jsonEncode(session.toJson());
     await _db.saveChatSession(conversationId, json,
         remoteIdentityPub: remoteUserId);
   }
@@ -318,7 +309,7 @@ class ChatSessionManager {
     }
     final storedFingerprint = String.fromCharCodes(stored);
     if (storedFingerprint != fingerprint) {
-      throw ChatRatchetException('remote identity changed — fingerprint mismatch');
+      throw ChatCryptoException('remote identity changed — fingerprint mismatch');
     }
   }
 

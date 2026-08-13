@@ -233,12 +233,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// 选图片/拍照发送。
   Future<void> _sendImage(ImageSource source) async {
     try {
-      // 拍照需相机权限；图库 Android 13+ 需 READ_MEDIA_IMAGES。
+      // 权限已在启动时统一申请，这里仅检查（未授权则提示去系统设置）。
       final perm = source == ImageSource.camera
           ? Permission.camera
           : Permission.photos;
-      if (!await perm.request().isGranted) {
-        _showSendError('需要相机/存储权限才能发送图片');
+      if (!await perm.isGranted) {
+        _showSendError('需要相机/存储权限，请在系统设置中允许');
         return;
       }
       final picked = await ImagePicker().pickImage(
@@ -251,6 +251,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final file = File(picked.path);
       final name = picked.name.isNotEmpty ? picked.name : p.basename(picked.path);
       final mime = lookupMimeType(picked.path) ?? 'image/jpeg';
+
+      // 发送前确认：预览图片 + 发送/取消。
+      final confirmed = await _confirmImageSend(file, name);
+      if (!confirmed || !mounted) return;
+
       final result = await ref
           .read(chatStateProvider.notifier)
           .controllerFor(
@@ -274,12 +279,79 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  /// 图片发送确认对话框：预览缩略图 + 文件名，确认才发送。
+  Future<bool> _confirmImageSend(File file, String name) async {
+    if (!mounted) return false;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('发送图片？'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.file(
+                file,
+                height: 200,
+                width: 200,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) =>
+                    const SizedBox(height: 100, child: Icon(Icons.image, size: 48)),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('发送'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
+  /// 文件发送确认对话框：文件名 + 大小，确认才发送。
+  Future<bool> _confirmFileSend(String name, int sizeBytes) async {
+    if (!mounted) return false;
+    final sizeText = sizeBytes > 1024 * 1024
+        ? '${(sizeBytes / 1024 / 1024).toStringAsFixed(1)} MB'
+        : '${(sizeBytes / 1024).toStringAsFixed(0)} KB';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('发送文件？'),
+        content: Text('$name\n($sizeText)', maxLines: 3, overflow: TextOverflow.ellipsis),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('发送'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
   /// 选任意文件发送。
   Future<void> _sendFilePicker() async {
     try {
-      // 文件选择需存储权限（Android 13+ 用 READ_MEDIA_IMAGES 覆盖）。
-      if (!await Permission.storage.request().isGranted) {
-        _showSendError('需要存储权限才能选择文件');
+      // 权限已在启动时统一申请，这里仅检查（未授权则提示去系统设置）。
+      if (!await Permission.storage.isGranted &&
+          !await Permission.photos.isGranted) {
+        _showSendError('需要存储权限，请在系统设置中允许');
         return;
       }
       final picked = await FilePicker.platform.pickFiles();
@@ -292,6 +364,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       }
       final name = f.name.isNotEmpty ? f.name : p.basename(path);
       final mime = lookupMimeType(name) ?? 'application/octet-stream';
+
+      // 发送前确认：文件名 + 大小 + 发送/取消。
+      final confirmed = await _confirmFileSend(name, f.size);
+      if (!confirmed || !mounted) return;
+
       final result = await ref
           .read(chatStateProvider.notifier)
           .controllerFor(

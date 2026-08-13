@@ -8,7 +8,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:path_provider/path_provider.dart';
 
-import '../../core/crypto/chat_ratchet.dart';
+import '../../core/crypto/chat_crypto.dart';
 import '../../core/crypto/chat_session_manager.dart';
 import '../../core/crypto/crypto_manager.dart';
 import '../../core/network/chat_signal.dart';
@@ -79,17 +79,23 @@ class ChatSessionController {
         utf8.encode(jsonEncode({'kind': isEmoji ? 'emoji' : 'text', 'body': body}));
     if (session == null) return {'error': 'session unavailable'};
 
-    final aad = ChatRatchet.associatedData(
+    final aad = ChatCrypto.associatedData(
       senderUserId: _localUserId,
       recipientUserId: _remoteUserId,
       conversationId: _conversationId,
     );
-    final enc = await ChatRatchet.encrypt(session, plaintext, aad: aad);
+    final enc = await ChatCrypto.encryptMessage(
+      session,
+      plaintext,
+      messageId: messageId,
+      aad: aad,
+    );
     await _sessions.saveSession(_conversationId, enc.session);
 
     final payload = <String, dynamic>{
       'message_id': messageId,
-      'ciphertext': base64Encode(enc.frame.toBytes()),
+      'ciphertext': base64Encode(enc.ciphertext),
+      'counter': enc.counter,
       'expires_in_seconds': expiresInSeconds,
       if (initPayload != null) 'init_payload': initPayload,
     };
@@ -130,7 +136,8 @@ class ChatSessionController {
     if (await _db.getMessage(messageId) != null) return;
 
     final ciphertextB64 = payload['ciphertext'] as String?;
-    if (ciphertextB64 == null) return;
+    final counter = (payload['counter'] as num?)?.toInt();
+    if (ciphertextB64 == null || counter == null) return;
 
     var session = await _sessions.loadSession(_conversationId);
     if (session == null) {
@@ -156,16 +163,18 @@ class ChatSessionController {
       }
     }
 
-    final aad = ChatRatchet.associatedData(
+    final aad = ChatCrypto.associatedData(
       senderUserId: _remoteUserId,
       recipientUserId: _localUserId,
       conversationId: _conversationId,
     );
-    final ChatRatchetDecryptResult dec;
+    final ChatCryptoDecryptResult dec;
     try {
-      dec = await ChatRatchet.decrypt(
+      dec = await ChatCrypto.decryptMessage(
         session,
-        ChatEncryptedFrame.fromBytes(base64Decode(ciphertextB64)),
+        base64Decode(ciphertextB64),
+        messageId: messageId,
+        counter: counter,
         aad: aad,
       );
     } catch (e) {
@@ -376,13 +385,18 @@ class ChatSessionController {
       'plaintext_sha256': plaintextSha,
       'aes_key': base64Encode(aesKey),
     };
-    final aad = ChatRatchet.associatedData(
+    final aad = ChatCrypto.associatedData(
       senderUserId: _localUserId,
       recipientUserId: _remoteUserId,
       conversationId: _conversationId,
     );
     if (session == null) return {'error': 'session unavailable'};
-    final enc = await ChatRatchet.encrypt(session, utf8.encode(jsonEncode(meta)), aad: aad);
+    final enc = await ChatCrypto.encryptMessage(
+      session,
+      utf8.encode(jsonEncode(meta)),
+      messageId: messageId,
+      aad: aad,
+    );
     await _sessions.saveSession(_conversationId, enc.session);
 
     // 2) 发送元数据 chatMessage（密文里只有元数据，无文件内容）。
@@ -393,7 +407,8 @@ class ChatSessionController {
       messageId: messageId,
       payload: {
         'message_id': messageId,
-        'ciphertext': base64Encode(enc.frame.toBytes()),
+        'ciphertext': base64Encode(enc.ciphertext),
+        'counter': enc.counter,
         'expires_in_seconds': expiresInSeconds,
         if (initPayload != null) 'init_payload': initPayload,
       },
