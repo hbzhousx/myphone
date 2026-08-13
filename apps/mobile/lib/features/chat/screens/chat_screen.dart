@@ -270,7 +270,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       await _loadMessages();
     } catch (e) {
       debugPrint('[CHAT] pick image failed: $e');
-      _showSendError('发送图片失败');
+      _showSendError('发送图片失败：$e');
     }
   }
 
