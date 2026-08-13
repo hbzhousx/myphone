@@ -115,7 +115,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   /// 新入站消息显示时自动回已读（markRead 会发 read 回执给对端）。
   Future<void> _maybeReadIncoming(List<Map<String, dynamic>> rows) async {
-    final controller = ref.read(chatStateProvider.notifier).controllerFor(
+    final controller = await ref.read(chatStateProvider.notifier).controllerFor(
           remoteUserId: widget.contactId,
           conversationId: _conversationId,
         );
@@ -144,15 +144,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final body = _inputController.text.trim();
     if (body.isEmpty) return;
     _inputController.clear();
-    final result = await ref.read(chatStateProvider.notifier).controllerFor(
-          remoteUserId: widget.contactId,
-          conversationId: _conversationId,
-        ).sendText(body, expiresInSeconds: _disappearSeconds);
-    if (result != null && result.containsKey('error')) {
-      // 会话建立失败（未登录/离线）时给出提示，避免静默丢消息。
+    try {
+      final controller = await ref.read(chatStateProvider.notifier).controllerFor(
+            remoteUserId: widget.contactId,
+            conversationId: _conversationId,
+          );
+      final result = await controller.sendText(body,
+          expiresInSeconds: _disappearSeconds);
+      if (result != null && result.containsKey('error')) {
+        // 会话建立失败（未登录/离线）时给出提示，避免静默丢消息。
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('发送失败：${result['error']}')),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('[CHAT] send text failed: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('发送失败：${result['error']}')),
+          SnackBar(content: Text('发送失败：$e')),
         );
       }
     }
@@ -260,19 +271,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final confirmed = await _confirmImageSend(file, name);
       if (!confirmed || !mounted) return;
 
-      final result = await ref
+      final controller = await ref
           .read(chatStateProvider.notifier)
           .controllerFor(
             remoteUserId: widget.contactId,
             conversationId: _conversationId,
-          )
-          .sendFile(
-            filePath: file.path,
-            kind: 'image',
-            fileName: name,
-            mimeType: mime,
-            expiresInSeconds: _disappearSeconds,
           );
+      final result = await controller.sendFile(
+        filePath: file.path,
+        kind: 'image',
+        fileName: name,
+        mimeType: mime,
+        expiresInSeconds: _disappearSeconds,
+      );
       if (result != null && result.containsKey('error')) {
         _showSendError(result['error'].toString());
       }
@@ -368,19 +379,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final confirmed = await _confirmFileSend(name, f.size);
       if (!confirmed || !mounted) return;
 
-      final result = await ref
+      final controller = await ref
           .read(chatStateProvider.notifier)
           .controllerFor(
             remoteUserId: widget.contactId,
             conversationId: _conversationId,
-          )
-          .sendFile(
-            filePath: path,
-            kind: mime.startsWith('video/') ? 'video' : 'file',
-            fileName: name,
-            mimeType: mime,
-            expiresInSeconds: _disappearSeconds,
           );
+      final result = await controller.sendFile(
+        filePath: path,
+        kind: mime.startsWith('video/') ? 'video' : 'file',
+        fileName: name,
+        mimeType: mime,
+        expiresInSeconds: _disappearSeconds,
+      );
       if (result != null && result.containsKey('error')) {
         _showSendError(result['error'].toString());
       }
@@ -443,13 +454,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             initialValue: _disappearSeconds,
             onSelected: (seconds) {
               setState(() => _disappearSeconds = seconds);
-              ref
-                  .read(chatStateProvider.notifier)
-                  .controllerFor(
-                    remoteUserId: widget.contactId,
-                    conversationId: _conversationId,
-                  )
-                  .sendDisappearingSetting(seconds);
+              () async {
+                final controller = await ref
+                    .read(chatStateProvider.notifier)
+                    .controllerFor(
+                      remoteUserId: widget.contactId,
+                      conversationId: _conversationId,
+                    );
+                controller.sendDisappearingSetting(seconds);
+              }();
             },
             itemBuilder: (context) => [
               for (final (seconds, label) in _disappearOptions)

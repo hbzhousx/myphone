@@ -68,18 +68,24 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
       _db.deleteExpiredMessages();
     });
     _db.deleteExpiredMessages();
+    if (!_readyCompleter.isCompleted) _readyCompleter.complete();
   }
+
+  /// _init 完成信号：controllerFor 等待 _localUserId 就绪，避免 from_user_id 为空。
+  Future<void> get ready => _readyCompleter.future;
+  final Completer<void> _readyCompleter = Completer<void>();
 
   /// 当前打开会话（由 UI 进入聊天页时调用）。
   void setActiveConversation(String? conversationId) {
     state = state.copyWith(activeConversationId: conversationId);
   }
 
-  /// 获取（或懒建）某会话的控制器。
-  ChatSessionController controllerFor({
+  /// 获取（或懒建）某会话的控制器。等待 _init 完成以确保 _localUserId 非空。
+  Future<ChatSessionController> controllerFor({
     required String remoteUserId,
     required String conversationId,
-  }) {
+  }) async {
+    await ready;
     return _controllers.putIfAbsent(conversationId, () => ChatSessionController(
           db: _db,
           sessions: _sessions,
@@ -120,7 +126,7 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
     var conv = await _db.getConversationByRemote(remoteUserId);
     final conversationId = conv?['id'] as String? ?? 'conv-$remoteUserId';
 
-    final controller = controllerFor(
+    final controller = await controllerFor(
       remoteUserId: remoteUserId,
       conversationId: conversationId,
     );
@@ -143,7 +149,7 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
     var conv = await _db.getConversationByRemote(remoteUserId);
     final conversationId = conv?['id'] as String? ?? 'conv-$remoteUserId';
 
-    final controller = controllerFor(
+    final controller = await controllerFor(
       remoteUserId: remoteUserId,
       conversationId: conversationId,
     );
@@ -166,7 +172,7 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
     final conv = await _db.getConversationByRemote(remoteUserId);
     if (conv == null) return;
     final conversationId = conv['id'] as String;
-    final controller = controllerFor(
+    final controller = await controllerFor(
       remoteUserId: remoteUserId,
       conversationId: conversationId,
     );
