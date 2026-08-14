@@ -48,11 +48,15 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
         _db = db,
         _sessions = sessions,
         super(const ChatState()) {
-    _init();
+    _init().whenComplete(_completeReady);
   }
 
   Future<void> _init() async {
-    _localUserId = await AuthGuard.getUserId() ?? '';
+    try {
+      _localUserId = await AuthGuard.getUserId() ?? '';
+    } catch (_) {
+      _localUserId = '';
+    }
     try {
       await _sessions.publishPrekeyBundle();
     } catch (_) {
@@ -68,12 +72,16 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
       _db.deleteExpiredMessages();
     });
     _db.deleteExpiredMessages();
-    if (!_readyCompleter.isCompleted) _readyCompleter.complete();
   }
 
   /// _init 完成信号：controllerFor 等待 _localUserId 就绪，避免 from_user_id 为空。
   Future<void> get ready => _readyCompleter.future;
   final Completer<void> _readyCompleter = Completer<void>();
+
+  /// 无论 _init 是否抛异常，都完成 ready，防止 controllerFor 死锁。
+  void _completeReady() {
+    if (!_readyCompleter.isCompleted) _readyCompleter.complete();
+  }
 
   /// 当前打开会话（由 UI 进入聊天页时调用）。
   void setActiveConversation(String? conversationId) {
