@@ -203,16 +203,19 @@ public class CallService extends Service {
         }
     }
 
-    public static void sendSignal(String json) {
+    /** 经常驻服务的 WS 发送一条信令。返回是否真正发出（服务未跑/WS 未连 → false）。
+     *  供 Flutter 侧 chat 发送感知失败：WS 不在线时不再静默吞掉，由调用方标记 failed。 */
+    public static boolean sendSignal(String json) {
         CallService svc = instance;
-        if (svc == null || json == null) return;
+        if (svc == null || json == null) return false;
         WebSocket ws = svc.socket;
-        if (ws != null) {
-            try {
-                ws.send(json);
-            } catch (Exception e) {
-                Log.w(TAG, "send failed", e);
-            }
+        if (ws == null) return false;
+        try {
+            ws.send(json);
+            return true;
+        } catch (Exception e) {
+            Log.w(TAG, "send failed", e);
+            return false;
         }
     }
 

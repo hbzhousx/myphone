@@ -210,12 +210,22 @@ class ServiceBridgeSignalingClient extends SignalingClient {
   }
 
   @override
-  bool sendChatSignal(ChatSignal signal) {
+  Future<bool> sendChatSignal(ChatSignal signal) async {
     final data = jsonEncode(signal.toJson());
     debugPrint('[SERVICE-BRIDGE] send chat type=${signal.type.name} to=${signal.toUserId} msgId=${signal.messageId}');
-    // 桥接模式下由原生常驻服务负责发送与重连，此处视为已交托发送。
-    _channel.invokeMethod('sendSignal', {'signal': data});
-    return true;
+    // 桥接模式下由原生常驻服务负责发送。await 原生侧 WS 是否真的发出：
+    // 服务未跑 / WS 未连 / send 抛异常 / 调用超时 → false，调用方标 failed，
+    // 不再静默吞掉。（对比 Signal：发送失败一定落 markAsSentFailed，用户可见。）
+    var ok = false;
+    try {
+      ok = await _channel
+              .invokeMethod<bool>('sendSignal', {'signal': data})
+              .timeout(const Duration(seconds: 3)) ?? false;
+    } catch (e) {
+      debugPrint('[SERVICE-BRIDGE] sendSignal invoke failed: $e');
+    }
+    if (!ok) debugPrint('[SERVICE-BRIDGE] send dropped: native WS not connected');
+    return ok;
   }
 
   @override

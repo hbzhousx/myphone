@@ -94,8 +94,8 @@ public class MainActivity extends FlutterFragmentActivity {
                         break;
                     }
                     case "sendSignal": {
-                        CallService.sendSignal(call.argument("signal"));
-                        result.success(null);
+                        boolean ok = CallService.sendSignal(call.argument("signal"));
+                        result.success(ok);
                         break;
                     }
                     case "setAppActive": {

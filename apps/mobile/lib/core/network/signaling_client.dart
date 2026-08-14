@@ -82,7 +82,8 @@ abstract class SignalingClient {
 
   /// 发送一个聊天信令（由具体传输实现）。
   /// 返回是否真正发出（WS 未连接时返回 false，供调用方标记 failed）。
-  bool sendChatSignal(ChatSignal signal);
+  /// 桥接实现需跨 MethodChannel await 原生侧结果，故为异步。
+  Future<bool> sendChatSignal(ChatSignal signal);
 
   // ---- 便捷发送方法（所有传输共用，序列化后调 [sendSignal]） ----
 
@@ -299,7 +300,7 @@ class DirectWSSignalingClient extends SignalingClient {
   }
 
   @override
-  bool sendChatSignal(ChatSignal signal) {
+  Future<bool> sendChatSignal(ChatSignal signal) async {
     final data = jsonEncode(signal.toJson());
     debugPrint('[CHAT] send type=${signal.type.name} to=${signal.toUserId} msgId=${signal.messageId}');
     final ch = _channel;

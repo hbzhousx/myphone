@@ -374,12 +374,20 @@ class DatabaseManager {
         conflictAlgorithm: sqlcipher.ConflictAlgorithm.replace);
   }
 
+  /// 取某会话的消息，返回**最新的 [limit] 条**（按时间正序，UI 直接渲染）。
+  ///
+  /// ★不能直接 `ORDER BY created_at ASC LIMIT n`——那会取到最旧的 n 条，
+  ///   chat_screen 每次轮询 getMessages 时刚发送的新消息（created_at 最新）就
+  ///   不在结果里 →「聊天页看不到自己发的消息，但会话列表能看到」。
+  ///   先倒序取最新 n 条再反转为正序，与 Signal 的 SNIPPET_QUERY 按
+  ///   DATE_RECEIVED DESC 取最新一行同理。
   Future<List<Map<String, dynamic>>> getMessages(String conversationId,
       {int limit = 100}) async {
     final db = await database;
-    return db.query('messages',
+    final rows = await db.query('messages',
         where: 'conversation_id = ?', whereArgs: [conversationId],
-        orderBy: 'created_at ASC', limit: limit);
+        orderBy: 'created_at DESC', limit: limit);
+    return rows.reversed.toList();
   }
 
   Future<Map<String, dynamic>?> getMessage(String id) async {

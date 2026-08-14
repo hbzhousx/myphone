@@ -125,7 +125,7 @@ class ChatSessionController {
         messageId: messageId,
         payload: payload,
       );
-      final sent = _signaling.sendChatSignal(sig);
+      final sent = await _signaling.sendChatSignal(sig);
       // 发送成功 → 更新状态 sent；WS 未连接 → 标记 failed，用户可见。
       await _db.updateMessageStatus(messageId, sent ? 'sent' : 'failed');
       if (!sent) {
