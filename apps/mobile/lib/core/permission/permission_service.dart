@@ -8,68 +8,23 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 class PermissionService {
-  /// 首次进入聊天页时引导：请求相机（拍照）+ 存储（图库/文件，旧机型）。
-  /// 图库/文件在 Android 13+ 走系统 picker 无需权限，仅在旧机型请求 storage。
-  static Future<bool> ensureChatPermissions(BuildContext context) async {
-    // 引导对话框：先解释，再触发系统授权。
-    final go = await _showGuide(
-      context,
-      title: '开启相机权限？',
-      message: '发送图片/拍照需要相机权限，文件选择使用系统选择器无需额外权限。'
-          '点击"去授权"后允许即可。',
-    );
-    if (!go) return false;
-
-    // 相机：拍照必需。
+  /// 首次进入聊天页时申请权限。直接触发系统授权框（Signal 做法：不搞中间引导层，
+  /// 用户看到的就是系统"允许/拒绝"）。已授权则跳过。仅请求相机（拍照必需），
+  /// 图库/文件走系统 picker 无需额外权限。
+  static Future<void> ensureChatPermissions(BuildContext context) async {
+    // 仅当未授权时才触发系统框，避免每次都弹。
+    if (await Permission.camera.isGranted) return;
     await Permission.camera.request();
-
-    // 旧机型（Android < 13）文件访问需存储权限；Android 13+ 走 picker 无需。
-    if (await Permission.photos.status.then((s) => !s.isGranted)) {
-      await Permission.storage.request();
+    // 通知（收到新消息提示），未授权才请求。
+    if (!await Permission.notification.isGranted) {
+      await Permission.notification.request();
     }
-
-    // 通知（收到新消息提示）。
-    await Permission.notification.request();
-
-    return true;
   }
 
-  /// 首次进入通话页时引导：请求麦克风（通话必需）。
+  /// 首次进入通话页时申请麦克风（通话必需）。直接触发系统授权框。
   static Future<bool> ensureCallPermissions(BuildContext context) async {
-    final go = await _showGuide(
-      context,
-      title: '开启麦克风权限？',
-      message: '语音通话需要麦克风权限，点击"去授权"后允许即可。',
-    );
-    if (!go) return false;
-
-    await Permission.microphone.request();
-    return await Permission.microphone.isGranted;
-  }
-
-  static Future<bool> _showGuide(
-    BuildContext context, {
-    required String title,
-    required String message,
-  }) async {
-    if (!context.mounted) return false;
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('暂不'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('去授权'),
-          ),
-        ],
-      ),
-    );
-    return result ?? false;
+    if (await Permission.microphone.isGranted) return true;
+    final status = await Permission.microphone.request();
+    return status.isGranted;
   }
 }
