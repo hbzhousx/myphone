@@ -100,22 +100,15 @@ class ChatSessionController {
       'expires_in_seconds': expiresInSeconds,
       if (initPayload != null) 'init_payload': initPayload,
     };
-    final sig = ChatSignal(
-      type: ChatSignalType.chatMessage,
-      fromUserId: _localUserId,
-      toUserId: _remoteUserId,
-      messageId: messageId,
-      payload: payload,
-    );
-    _signaling.sendChatSignal(sig);
-
+    // Signal 模式：先把本地消息行插入（SENDING 状态），保证气泡总是出现，
+    // 再异步发送 WS。即使网络/加密失败，本地也能看到消息（标 failed）。
     await _db.insertMessage({
       'id': messageId,
       'conversation_id': _conversationId,
       'direction': 'outgoing',
       'kind': isEmoji ? 'emoji' : 'text',
       'body': body,
-      'status': 'sent',
+      'status': 'sending',
       'expires_in_seconds': expiresInSeconds,
       'expires_at': expiresInSeconds > 0
           ? DateTime.now().millisecondsSinceEpoch + expiresInSeconds * 1000
@@ -123,6 +116,25 @@ class ChatSessionController {
       'sent_at': DateTime.now().millisecondsSinceEpoch,
     });
     await _touchConversation(body, messageId);
+
+    try {
+      final sig = ChatSignal(
+        type: ChatSignalType.chatMessage,
+        fromUserId: _localUserId,
+        toUserId: _remoteUserId,
+        messageId: messageId,
+        payload: payload,
+      );
+      final sent = _signaling.sendChatSignal(sig);
+      // 发送成功 → 更新状态 sent；WS 未连接 → 标记 failed，用户可见。
+      await _db.updateMessageStatus(messageId, sent ? 'sent' : 'failed');
+      if (!sent) {
+        return {'error': 'WS 未连接，消息未发出'};
+      }
+    } catch (e) {
+      await _db.updateMessageStatus(messageId, 'failed');
+      return {'error': 'send failed: $e'};
+    }
 
     return {'message_id': messageId};
   }
@@ -302,16 +314,16 @@ class ChatSessionController {
 
   /// 确保 conversation 行存在（messages.conversation_id 有外键约束，
   /// 若发送前无该行，insertMessage 会失败导致本机看不到消息）。
+  /// ★不吞异常：若 conversation 建失败（如 DB 表缺失），抛出让 sendText 标记
+  ///   failed 并提示，避免「外键失败被静默吞掉 → 消息消失但无任何提示」。
   Future<void> _ensureConversation() async {
-    try {
-      final existing = await _db.getConversation(_conversationId);
-      if (existing == null) {
-        await _db.upsertConversation({
-          'id': _conversationId,
-          'remote_user_id': _remoteUserId,
-        });
-      }
-    } catch (_) {}
+    final existing = await _db.getConversation(_conversationId);
+    if (existing == null) {
+      await _db.upsertConversation({
+        'id': _conversationId,
+        'remote_user_id': _remoteUserId,
+      });
+    }
   }
 
   Future<void> _touchConversation(String preview, String lastMessageId) async {
@@ -416,7 +428,20 @@ class ChatSessionController {
     );
     await _sessions.saveSession(_conversationId, enc.session);
 
-    // 2) 发送元数据 chatMessage（密文里只有元数据，无文件内容）。
+    // 2) 先插本地附件消息行（Signal 模式），保证气泡总是出现。
+    await _db.insertMessage({
+      'id': messageId,
+      'conversation_id': _conversationId,
+      'direction': 'outgoing',
+      'kind': kind,
+      'body': fileName,
+      'status': 'pending',
+      'expires_in_seconds': expiresInSeconds,
+      'transfer_id': transferId,
+      'sent_at': DateTime.now().millisecondsSinceEpoch,
+    });
+
+    // 3) 发送元数据 chatMessage（密文里只有元数据，无文件内容）。
     _signaling.sendChatSignal(ChatSignal(
       type: ChatSignalType.chatMessage,
       fromUserId: _localUserId,
@@ -430,19 +455,6 @@ class ChatSessionController {
         if (initPayload != null) 'init_payload': initPayload,
       },
     ));
-
-    // 3) 本地落一条附件消息（pending 状态，messages 表 CHECK 不支持 'transferring'）。
-    await _db.insertMessage({
-      'id': messageId,
-      'conversation_id': _conversationId,
-      'direction': 'outgoing',
-      'kind': kind,
-      'body': fileName,
-      'status': 'pending',
-      'expires_in_seconds': expiresInSeconds,
-      'transfer_id': transferId,
-      'sent_at': DateTime.now().millisecondsSinceEpoch,
-    });
     await _db.insertAttachment({
       'id': transferId,
       'message_id': messageId,

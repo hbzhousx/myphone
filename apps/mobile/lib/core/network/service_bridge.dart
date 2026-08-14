@@ -210,10 +210,12 @@ class ServiceBridgeSignalingClient extends SignalingClient {
   }
 
   @override
-  void sendChatSignal(ChatSignal signal) {
+  bool sendChatSignal(ChatSignal signal) {
     final data = jsonEncode(signal.toJson());
     debugPrint('[SERVICE-BRIDGE] send chat type=${signal.type.name} to=${signal.toUserId} msgId=${signal.messageId}');
+    // 桥接模式下由原生常驻服务负责发送与重连，此处视为已交托发送。
     _channel.invokeMethod('sendSignal', {'signal': data});
+    return true;
   }
 
   @override

@@ -81,7 +81,8 @@ abstract class SignalingClient {
   void sendSignal(CallSignal signal);
 
   /// 发送一个聊天信令（由具体传输实现）。
-  void sendChatSignal(ChatSignal signal);
+  /// 返回是否真正发出（WS 未连接时返回 false，供调用方标记 failed）。
+  bool sendChatSignal(ChatSignal signal);
 
   // ---- 便捷发送方法（所有传输共用，序列化后调 [sendSignal]） ----
 
@@ -298,10 +299,16 @@ class DirectWSSignalingClient extends SignalingClient {
   }
 
   @override
-  void sendChatSignal(ChatSignal signal) {
+  bool sendChatSignal(ChatSignal signal) {
     final data = jsonEncode(signal.toJson());
     debugPrint('[CHAT] send type=${signal.type.name} to=${signal.toUserId} msgId=${signal.messageId}');
-    _channel?.sink.add(data);
+    final ch = _channel;
+    if (ch == null || _disposed) {
+      debugPrint('[CHAT] send dropped: WS not connected');
+      return false;
+    }
+    ch.sink.add(data);
+    return true;
   }
 
   @override
