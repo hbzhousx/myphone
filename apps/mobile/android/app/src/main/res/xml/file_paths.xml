@@ -2,10 +2,14 @@
 <paths>
     <!-- OTA 下载的 APK 存于应用文档目录(files 下),需暴露给系统安装器 -->
     <files-path name="apks" path="." />
-    <!-- 聊天附件明文存于 getApplicationDocumentsDirectory()(app_flutter/chat_media/),
-         不在 files 下,需用 root-path(应用数据目录)暴露,否则 FileProvider 抛
-         IllegalArgumentException → "无法用其他应用打开该文件" -->
-    <root-path name="app_flutter" path="app_flutter/" />
+    <!-- 聊天附件明文存于 getApplicationDocumentsDirectory()(Android = getDir("flutter")),
+         路径可能是 /data/user/0/<pkg>/app_flutter/ 或 /data/data/<pkg>/app_flutter/
+         （两前缀为同一物理目录的符号链接/别名）。FileProvider 用 canonical path 匹配
+         root，之前用 <root-path path="app_flutter/"> 只匹配 /data/user/0 前缀，
+         在返回 /data/data 前缀的设备上抛 "Failed to find configured root"。
+         社区标准解法(StackOverflow): <root-path path="." /> 暴露整个应用私有根，
+         canonical 后两前缀都能匹配。生产可收窄到具体子目录。 -->
+    <root-path name="root" path="." />
     <!-- 发送方源文件(file_picker 选中的文件)在 cache 目录,需暴露 -->
     <cache-path name="cache" path="." />
 </paths>

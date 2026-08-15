@@ -186,14 +186,24 @@ public class MainActivity extends FlutterFragmentActivity {
                 if ("openFile".equals(call.method)) {
                     String path = call.argument("path");
                     String mime = call.argument("mime");
+                    // 返回结构：{"ok": 1成功/0失败/2无应用, "err": 异常详情(可选)}。
+                    java.util.Map<String, Object> r = new java.util.HashMap<>();
                     if (path == null) {
-                        result.success(false);
+                        r.put("ok", 0);
+                        r.put("err", "path is null");
+                        result.success(r);
                         return;
                     }
                     try {
-                        File file = new File(path);
+                        // ★canonical 规范化：/data/data/<pkg> 与 /data/user/0/<pkg> 是
+                        //   符号链接。FileProvider 内部用 canonical path 匹配 root，
+                        //   若传入 /data/data/... 会 "Failed to find configured root"。
+                        //   getCanonicalFile() 解析符号链接 → /data/user/0/... → 匹配。
+                        File file = new File(path).getCanonicalFile();
                         if (!file.exists()) {
-                            result.success(false);
+                            r.put("ok", 0);
+                            r.put("err", "file not exists: " + path);
+                            result.success(r);
                             return;
                         }
                         Uri contentUri = FileProvider.getUriForFile(
@@ -202,11 +212,25 @@ public class MainActivity extends FlutterFragmentActivity {
                         intent.setDataAndType(contentUri, mime);
                         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        // 微信/QQ 式：先检测有没有应用能处理该 mime（resolveActivity）。
+                        // 有 → startActivity，系统自动弹"选择打开方式：仅一次/始终"选择器
+                        //   （多应用时）；无 → 返回明确错误码(2)，客户端提示。
+                        android.content.pm.ResolveInfo ri = getPackageManager()
+                            .resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY);
+                        if (ri == null) {
+                            r.put("ok", 2); // 2 = 无可用应用打开该类型文件
+                            r.put("err", "no activity for mime: " + mime);
+                            result.success(r);
+                            return;
+                        }
                         startActivity(intent);
-                        result.success(true);
+                        r.put("ok", 1); // 1 = 已启动（系统弹选择器）
+                        result.success(r);
                     } catch (Exception e) {
                         android.util.Log.w("MainActivity", "open file failed: " + e);
-                        result.success(false);
+                        r.put("ok", 0); // 0 = 失败
+                        r.put("err", String.valueOf(e));
+                        result.success(r);
                     }
                 } else {
                     result.notImplemented();

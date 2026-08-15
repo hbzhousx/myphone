@@ -430,21 +430,35 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     try {
       final attach = await DatabaseManager.instance.getAttachment(transferId);
       if (attach == null) return;
-      final path = attach['local_plain_path'] as String?;
+      // ★规范化路径：FileProvider 的 root-path 用 canonical path 匹配，而
+      //   /data/data/<pkg> 与 /data/user/0/<pkg> 是符号链接。若传未规范化的
+      //   /data/data/...，FileProvider 找不到 root → "Failed to find configured root"
+      //   → 打不开。resolveSymbolicLinksSync 消除符号链接差异，两边一致。
+      final rawPath = attach['local_plain_path'] as String?;
+      late String path;
+      if (rawPath == null) {
+        _showSendError('文件尚未到达');
+        return;
+      }
+      try {
+        path = File(rawPath).resolveSymbolicLinksSync();
+      } catch (_) {
+        path = rawPath;
+      }
       // 诊断：点击附件时上报 path+exists+size（定位"文件收到但无法预览/打开"）。
-      final f = path != null ? File(path) : null;
-      final exists = f?.existsSync() ?? false;
+      final f = File(path);
+      final exists = f.existsSync();
       try {
         _loader?.onDiag?.call('ui:open-attach', {
           'tid': transferId,
           'path': path,
           'exists': exists,
-          'size': exists ? f!.lengthSync() : -1,
+          'size': exists ? f.lengthSync() : -1,
           'kind': attach['kind'],
           'enc': attach['local_enc_path'],
         });
       } catch (_) {}
-      if (path == null || !File(path).existsSync()) {
+      if (!File(path).existsSync()) {
         _showSendError('文件尚未到达');
         return;
       }
@@ -472,24 +486,46 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         // 文件 → 原生系统打开（MainActivity 用 FileProvider 生成 content:// 后
         // ACTION_VIEW，对齐 Signal 的 Intent.ACTION_VIEW + PartProvider）。
         final mime = attach['mime_type'] as String? ?? 'application/octet-stream';
-        final ok = await _openFileNative(path, mime);
-        if (!ok && mounted) _showSendError('无法用其他应用打开该文件');
+        // 诊断：打开开始（若转圈且此步已报但 ui:open-native 未报 → 卡在 MethodChannel）。
+        try {
+          _loader?.onDiag?.call('ui:open-start', {'tid': transferId, 'mime': mime, 'path': path});
+        } catch (_) {}
+        final res = await _openFileNative(path, mime);
+        final ok = res['ok'] as int? ?? 0;
+        final err = res['err'] as String?;
+        // 诊断：原生打开结果（定位 PDF 打不开——FileProvider false vs 无查看器）。
+        try {
+          _loader?.onDiag?.call('ui:open-native', {
+            'tid': transferId,
+            'path': path,
+            'mime': mime,
+            'ok': ok,
+            if (err != null) 'err': err,
+          });
+        } catch (_) {}
+        if (ok == 2) {
+          // 无应用能处理该类型 → 微信式引导：提示用户安装可打开的应用。
+          if (mounted) _showSendError('未安装可打开此文件的应用');
+        } else if (ok != 1 && mounted) {
+          _showSendError('无法用其他应用打开该文件');
+        }
       }
     } catch (e) {
       debugPrint('[CHAT] open attachment failed: $e');
     }
   }
 
-  /// 经 MethodChannel 调原生打开文件（FileProvider + ACTION_VIEW）。
+  /// 经 MethodChannel 调原生打开文件（FileProvider + ACTION_VIEW + resolveActivity）。
+  /// 返回 Map：{'ok': 1成功/0失败/2无应用, 'err': 异常详情}。
   static const _openChannel = MethodChannel('myphone/open');
-  Future<bool> _openFileNative(String path, String mime) async {
+  Future<Map<String, dynamic>> _openFileNative(String path, String mime) async {
     try {
-      final ok = await _openChannel
-          .invokeMethod<bool>('openFile', {'path': path, 'mime': mime});
-      return ok ?? false;
+      final r = await _openChannel
+          .invokeMethod<Map<dynamic, dynamic>>('openFile', {'path': path, 'mime': mime});
+      return Map<String, dynamic>.from(r ?? const {});
     } catch (e) {
       debugPrint('[CHAT] native open failed: $e');
-      return false;
+      return {'ok': 0, 'err': '$e'};
     }
   }
 
