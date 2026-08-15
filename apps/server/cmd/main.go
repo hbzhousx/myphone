@@ -46,6 +46,7 @@ func main() {
 	contactDiscovery := discovery.NewContactDiscovery(db)
 	adminHandler := admin.NewHandler(db, hub.Stats)
 	otaHandler := ota.NewHandler(os.Getenv("MYPHONE_UPDATE_DIR"))
+	attachmentsHandler := api.NewAttachmentsHandler(os.Getenv("MYPHONE_ATTACHMENT_DIR"))
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -72,6 +73,8 @@ func main() {
 			signaling.HandlePresence(hub, w, r)
 		}))
 		r.Post("/contacts/discover", api.AuthMiddleware(contactDiscovery.Discover))
+		r.Post("/attachments", api.AuthMiddleware(attachmentsHandler.Upload))
+		r.Get("/attachments/{id}", api.AuthMiddleware(attachmentsHandler.Download))
 	})
 
 	r.Get("/ws", api.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {

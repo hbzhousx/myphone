@@ -74,6 +74,7 @@ PORT=8080
 MYPHONE_DB_PASSWORD=${DB_PASSWORD}
 MYPHONE_TURN_PASSWORD=${TURN_PASSWORD}
 MYPHONE_PUBLIC_IP=${PUBLIC_IP}
+MYPHONE_ATTACHMENT_DIR=/opt/myphone/attachments
 EOF
 chmod 600 /etc/myphone/myphone.env
 echo "==> 已生成 /etc/myphone/myphone.env"
