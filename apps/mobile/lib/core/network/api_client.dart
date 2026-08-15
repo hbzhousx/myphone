@@ -3,6 +3,7 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import '../../app/auth_guard.dart';
@@ -222,6 +223,49 @@ class ApiClient {
       await sink.close();
       rethrow;
     }
+  }
+
+  // --- 附件（服务器中转，密文）---
+
+  /// 上传已加密的附件密文，返回 {attachment_id, url, size_bytes}。
+  /// 服务器只存密文、不解密（Signal 附件 CDN 同理，E2EE 不破坏）。
+  Future<Map<String, dynamic>> uploadAttachment(
+    List<int> ciphertext,
+    String fileName,
+  ) async {
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('$_baseUrl/attachments'),
+    );
+    request.headers.addAll(await _authHeaders());
+    request.files.add(http.MultipartFile.fromBytes(
+      'file',
+      ciphertext,
+      filename: fileName,
+    ));
+    final streamed = await request.send();
+    final response = await http.Response.fromStream(streamed);
+    return _handleResponse(response);
+  }
+
+  /// 按 [url]（如 /v1/attachments/<id>）下载附件密文，返回字节。
+  /// ★url 已含 /v1 前缀，故用 httpBase（不含 /v1）拼接，避免 /v1/v1 重复 404。
+  Future<Uint8List> downloadAttachment(String url) async {
+    final uri = url.startsWith('http')
+        ? Uri.parse(url)
+        : Uri.parse(ServerConfig.httpBase + (url.startsWith('/') ? url : '/$url'));
+    final request = http.Request('GET', uri);
+    request.headers.addAll(await _authHeaders());
+    final streamed = await _client.send(request);
+    if (streamed.statusCode >= 400) {
+      throw ApiException(
+        statusCode: streamed.statusCode,
+        message: 'attachment download failed: ${streamed.statusCode}',
+      );
+    }
+    final bytes = <int>[];
+    await streamed.stream.listen(bytes.addAll).asFuture();
+    return Uint8List.fromList(bytes);
   }
 
   void dispose() => _client.close();

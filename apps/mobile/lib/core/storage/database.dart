@@ -11,7 +11,7 @@ import 'key_manager.dart';
 
 class DatabaseManager {
   static const _databaseName = 'myphone.db';
-  static const _schemaVersion = 4;
+  static const _schemaVersion = 6;
   static const _plaintextBackupSuffix = '.plaintext-migration';
   static DatabaseManager? _instance;
   sqlcipher.Database? _db;
@@ -138,7 +138,8 @@ class DatabaseManager {
         plaintext_sha256 TEXT,
         local_enc_path TEXT, local_plain_path TEXT,
         aes_key BLOB,
-        status TEXT CHECK(status IN ('pending','transferring','done','failed')),
+        download_url TEXT,
+        status TEXT CHECK(status IN ('pending','transferring','done','failed','downloading')),
         created_at INTEGER NOT NULL)
     ''');
     await db.execute('''
@@ -157,6 +158,43 @@ class DatabaseManager {
     }
     if (oldVersion < 4) {
       await _createChatSchema(db);
+    }
+    if (oldVersion < 5) {
+      // v5: 附件表加 download_url 列（ALTER 加列不更新 CHECK，重建在 <6 做）。
+      try {
+        await db.execute('ALTER TABLE message_attachments ADD COLUMN download_url TEXT');
+      } catch (_) {
+        // 列已存在（旧库重复升级）则忽略。
+      }
+    }
+    if (oldVersion < 6) {
+      // v6: 重建 message_attachments —— status CHECK 放宽含 'downloading'。
+      //    SQLite 改 CHECK 必须重建表（复制数据→drop→重建→回填）。
+      //    ★覆盖两种情况：从 v4/v5 升级都走到这里（v4 的 download_url 列由 <5 补）。
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS message_attachments_v6 (
+          id TEXT PRIMARY KEY,
+          message_id TEXT REFERENCES messages(id),
+          conversation_id TEXT,
+          kind TEXT CHECK(kind IN ('image','video','file')),
+          file_name TEXT, mime_type TEXT, size_bytes INTEGER,
+          plaintext_sha256 TEXT,
+          local_enc_path TEXT, local_plain_path TEXT,
+          aes_key BLOB,
+          download_url TEXT,
+          status TEXT CHECK(status IN ('pending','transferring','done','failed','downloading')),
+          created_at INTEGER NOT NULL)
+      ''');
+      await db.execute('''
+        INSERT INTO message_attachments_v6
+          (id, message_id, conversation_id, kind, file_name, mime_type, size_bytes,
+           plaintext_sha256, local_enc_path, local_plain_path, aes_key, download_url, status, created_at)
+        SELECT id, message_id, conversation_id, kind, file_name, mime_type, size_bytes,
+           plaintext_sha256, local_enc_path, local_plain_path, aes_key, download_url, status, created_at
+        FROM message_attachments
+      ''');
+      await db.execute('DROP TABLE message_attachments');
+      await db.execute('ALTER TABLE message_attachments_v6 RENAME TO message_attachments');
     }
   }
 
@@ -430,6 +468,15 @@ class DatabaseManager {
     final db = await database;
     await db.update('message_attachments', {'status': status},
         where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 取某会话所有待下载附件（status=downloading，含 download_url）。
+  /// Signal 式独立下载扫描用：消息落库后扫描 downloading 附件并逐个下载。
+  Future<List<Map<String, dynamic>>> getPendingDownloads(String conversationId) async {
+    final db = await database;
+    return db.query('message_attachments',
+        where: 'conversation_id = ? AND status = ?',
+        whereArgs: [conversationId, 'downloading']);
   }
 
   Future<void> saveChatSession(String conversationId, String sessionJson,

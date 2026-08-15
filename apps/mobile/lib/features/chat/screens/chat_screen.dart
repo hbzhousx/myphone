@@ -431,6 +431,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final attach = await DatabaseManager.instance.getAttachment(transferId);
       if (attach == null) return;
       final path = attach['local_plain_path'] as String?;
+      // 诊断：点击附件时上报 path+exists+size（定位"文件收到但无法预览/打开"）。
+      final f = path != null ? File(path) : null;
+      final exists = f?.existsSync() ?? false;
+      try {
+        _loader?.onDiag?.call('ui:open-attach', {
+          'tid': transferId,
+          'path': path,
+          'exists': exists,
+          'size': exists ? f!.lengthSync() : -1,
+          'kind': attach['kind'],
+          'enc': attach['local_enc_path'],
+        });
+      } catch (_) {}
       if (path == null || !File(path).existsSync()) {
         _showSendError('文件尚未到达');
         return;

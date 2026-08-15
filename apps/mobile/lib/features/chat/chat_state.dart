@@ -137,6 +137,11 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
       case ChatSignalType.chatInit:
         await _routeToConversation(signal);
         break;
+      case ChatSignalType.chatAttachment:
+        // Signal 式独立附件指针：单独处理（MessageContentProcessor 专门处理附件），
+        // 解密密钥 → 落库 → 触发下载。不依赖 chatMessage body 解析。
+        await _routeAttachment(signal);
+        break;
       case ChatSignalType.chatReceipt:
         await _routeReceipt(signal);
         break;
@@ -148,12 +153,13 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
         break;
       case ChatSignalType.chatTyping:
         break;
+      // 数据通道文件信令（chatFileOffer/Answer/Ice/Done）已退役：
+      // 文件传输改走服务器中转（HTTP 上传/下载密文），不再有这些信令。
+      // 枚举值保留以兼容已装旧版 App 可能发送的残留包。
       case ChatSignalType.chatFileOffer:
       case ChatSignalType.chatFileAnswer:
       case ChatSignalType.chatFileIce:
       case ChatSignalType.chatFileDone:
-        // 数据通道文件信令：路由到对应会话的控制器。
-        await _routeFileSignal(signal);
         break;
     }
   }
@@ -171,34 +177,17 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
 
     switch (signal.type) {
       case ChatSignalType.chatMessage:
-        await controller.handleIncoming(signal);
+        try {
+          await controller.handleIncoming(signal);
+        } catch (e, st) {
+          debugPrint('[CHAT-STATE] handleIncoming failed: $e\n$st');
+        }
+        // Signal 式独立附件下载 job：unawaited 排队，不依赖 handleIncoming 成功
+        // （Signal AttachmentDownloadJob 语义：下载是独立 job，消息处理失败不阻塞）。
+        unawaited(controller.maybeDownloadAttachments());
         break;
       case ChatSignalType.chatDisappearing:
         await controller.handleDisappearing(signal);
-        break;
-      default:
-        break;
-    }
-  }
-
-  /// 路由数据通道文件信令（chatFileOffer/Answer/Ice/Done）到对应会话。
-  Future<void> _routeFileSignal(ChatSignal signal) async {
-    final remoteUserId = signal.fromUserId;
-    var conv = await _db.getConversationByRemote(remoteUserId);
-    final conversationId = conv?['id'] as String? ?? 'conv-$remoteUserId';
-
-    final controller = await controllerFor(
-      remoteUserId: remoteUserId,
-      conversationId: conversationId,
-    );
-
-    switch (signal.type) {
-      case ChatSignalType.chatFileOffer:
-        await controller.handleFileOffer(signal);
-        break;
-      case ChatSignalType.chatFileAnswer:
-      case ChatSignalType.chatFileIce:
-        await controller.handleFileSignal(signal);
         break;
       default:
         break;
@@ -215,6 +204,25 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
       conversationId: conversationId,
     );
     await controller.handleReceipt(signal);
+  }
+
+  /// 路由独立附件指针信令（chatAttachment）到对应会话。
+  /// Signal 式：附件下载由专门处理触发，不经过 handleIncoming body 解析。
+  Future<void> _routeAttachment(ChatSignal signal) async {
+    final remoteUserId = signal.fromUserId;
+    var conv = await _db.getConversationByRemote(remoteUserId);
+    final conversationId = conv?['id'] as String? ?? 'conv-$remoteUserId';
+    final controller = await controllerFor(
+      remoteUserId: remoteUserId,
+      conversationId: conversationId,
+    );
+    try {
+      await controller.handleAttachmentSignal(signal);
+    } catch (e, st) {
+      debugPrint('[CHAT-STATE] handleAttachmentSignal failed: $e\n$st');
+    }
+    // Signal 式独立下载 job：unawaited，不依赖 handleAttachmentSignal 完全成功。
+    unawaited(controller.maybeDownloadAttachments());
   }
 
   @override

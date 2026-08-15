@@ -13,6 +13,7 @@ enum ChatSignalType {
   chatFileIce,
   chatFileDone,
   chatDiag,
+  chatAttachment,
 }
 
 class ChatSignal {
