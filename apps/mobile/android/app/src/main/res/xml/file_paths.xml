@@ -2,4 +2,10 @@
 <paths>
     <!-- OTA 下载的 APK 存于应用文档目录(files 下),需暴露给系统安装器 -->
     <files-path name="apks" path="." />
+    <!-- 聊天附件明文存于 getApplicationDocumentsDirectory()(app_flutter/chat_media/),
+         不在 files 下,需用 root-path(应用数据目录)暴露,否则 FileProvider 抛
+         IllegalArgumentException → "无法用其他应用打开该文件" -->
+    <root-path name="app_flutter" path="app_flutter/" />
+    <!-- 发送方源文件(file_picker 选中的文件)在 cache 目录,需暴露 -->
+    <cache-path name="cache" path="." />
 </paths>

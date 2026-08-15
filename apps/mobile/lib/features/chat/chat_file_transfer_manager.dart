@@ -55,8 +55,6 @@ class ChatFileTransferManager {
   /// 诊断上报回调（fire-and-forget，服务器 [CHAT-DIAG] 可见）。
   final void Function(String step, Map<String, dynamic> data)? onDiag;
 
-  rtc.RTCPeerConnection? _pc;
-  rtc.RTCDataChannel? _dc;
   ChatFileTransfer? _current;
   Timer? _idleTimer;
   bool _isSender = false;
@@ -65,6 +63,14 @@ class ChatFileTransferManager {
   String? _receivePlainPath;
   Uint8List? _receiveAesKey;
   final List<int> _receivedCiphertext = [];
+
+  // ---- 传输串行化（单传输模型）----
+  // 管理器一次只支持一个活动传输。连发/连收时若新传输不等上一个结束就 teardown，
+  // 会掐断上一个正在传输的 PC → 接收方拿到 0 字节空文件 → 无法预览。
+  // 用 turn 链串行化：新传输开始前必须等上一个彻底结束。
+  Completer<void>? _turnDone; // 当前传输完成信号（数据帧发完/收完）
+  rtc.RTCPeerConnection? _turnPc; // 当前 turn 的 PC（识别陈旧事件）
+  rtc.RTCDataChannel? _turnDc; // 当前 turn 的 DC（识别陈旧事件）
 
   ChatFileTransferManager({this.onProgress, this.onSignal, this.onDiag});
 
@@ -79,14 +85,13 @@ class ChatFileTransferManager {
     required Uint8List aesKey,
     required String encPath,
   }) async {
-    // ★先清理旧 PC：与 handleOffer 对称。发送完成后 DataChannel 保持打开，
-    //   _pc 不置空；下一次 sendFile 的 _createPeerConnection() 命中 `_pc != null`
-    //   直接复用残留/半坏 PC → 不再收集 ICE 候选 → 接收方只有自己侧候选，
-    //   ICE 永远 Failed → 连发两张图第二张收不到。每次发送都用全新 PC。
-    if (_pc != null) {
-      onDiag?.call('file:reuse-pc-send', {'transferId': transferId});
-      _teardown();
+    // ★串行化：单传输模型。必须等上一个传输（含进行中接收）彻底结束再开新 turn，
+    //   否则 teardown 会掐断上一个正在传输的 PC → 接收方拿到 0 字节空文件。
+    if (_turnDone != null) {
+      onDiag?.call('file:queue-wait', {'transferId': transferId});
+      await _turnDone!.future;
     }
+
     final file = File(filePath);
 
     // 加密源文件到本地密文（流式分块）。块格式：[4B len][nonce(12)][ciphertext||mac]，
@@ -122,10 +127,11 @@ class ChatFileTransferManager {
       mimeType: mimeType,
     );
     _isSender = true;
+    _startTurn();
 
     final pc = await _createPeerConnection();
     final dc = await pc.createDataChannel('myphone-files', rtc.RTCDataChannelInit());
-    _dc = dc;
+    _turnDc = dc;
     _setupDataChannel(dc);
 
     final offer = await pc.createOffer();
@@ -148,11 +154,11 @@ class ChatFileTransferManager {
     required String filePath,
     required Uint8List aesKey,
   }) async {
-    // ★先清理旧 PC：前一次传输若未 teardown（连接未断开但传输失败），_pc 残留，
-    //   本会话复用旧 PC → 不响应新 offer → 无 answer → 数据通道不建立 → 无法预览。
-    if (_pc != null) {
-      onDiag?.call('file:reuse-pc', {'transferId': transferId});
-      _teardown();
+    // ★串行化：单传输模型。若上一个传输仍在进行（连发多张图/收发并发），
+    //   必须等其结束再开新 PC，否则 teardown 掐断上一个 → 接收方拿 0 字节空文件。
+    if (_turnDone != null) {
+      onDiag?.call('file:queue-wait', {'transferId': transferId});
+      await _turnDone!.future;
     }
     onDiag?.call('file:offer-start', {'transferId': transferId});
     _current = ChatFileTransfer(
@@ -165,10 +171,11 @@ class ChatFileTransferManager {
     _receivePlainPath = filePath;
     _receiveAesKey = aesKey;
     _isSender = false;
+    _startTurn();
 
     final pc = await _createPeerConnection();
     pc.onDataChannel = (channel) {
-      _dc = channel;
+      _turnDc = channel;
       _setupDataChannel(channel);
     };
     await pc.setRemoteDescription(rtc.RTCSessionDescription(sdp, 'offer'));
@@ -184,8 +191,8 @@ class ChatFileTransferManager {
   /// 处理入站 ICE candidate。
   Future<void> handleIceCandidate(
       String transferId, Map<String, dynamic> candidate) async {
-    if (_pc == null) return;
-    await _pc!.addCandidate(rtc.RTCIceCandidate(
+    if (_turnPc == null) return;
+    await _turnPc!.addCandidate(rtc.RTCIceCandidate(
       candidate['candidate'] as String? ?? '',
       candidate['sdp_mid'] as String? ?? '',
       candidate['sdp_mline_index'] as int? ?? 0,
@@ -194,12 +201,12 @@ class ChatFileTransferManager {
 
   /// 处理入站 answer（offer 方设置远端描述后 ICE 开始）。
   Future<void> handleAnswer(String transferId, String sdp) async {
-    if (_pc == null) return;
-    await _pc!.setRemoteDescription(rtc.RTCSessionDescription(sdp, 'answer'));
+    if (_turnPc == null) return;
+    await _turnPc!.setRemoteDescription(rtc.RTCSessionDescription(sdp, 'answer'));
   }
 
   Future<rtc.RTCPeerConnection> _createPeerConnection() async {
-    if (_pc != null) return _pc!;
+    if (_turnPc != null) return _turnPc!;
     final policy = await determineIcePolicy();
     onDiag?.call('file:pc', {
       'policy': policy.name,
@@ -229,20 +236,27 @@ class ChatFileTransferManager {
       onDiag?.call('file:ice-state', {'state': state.name});
     };
     pc.onConnectionState = (state) {
+      // 陈旧 PC 事件（上一个 turn 的 PC 已在 endTurn 里 close）——忽略。
+      if (_turnPc != pc) return;
       onDiag?.call('file:conn-state', {'state': state.name});
       if (state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
         if (_current != null) {
           onProgress?.call(_current!, 0, kFailed);
         }
-        _teardown();
+        // 断开即本 turn 失败：close 并放行队列（_endTurn complete turn 信号）。
+        _endTurn();
       }
     };
-    _pc = pc;
+    _turnPc = pc;
     return pc;
   }
 
   void _setupDataChannel(rtc.RTCDataChannel dc) {
+    _turnDc = dc;
     dc.stateChangeStream.listen((state) {
+      // 陈旧 DC 事件（上一个 turn 的 DC 已在 teardown 里 close，但 listener 仍
+      // 残留）——忽略，避免误触发 finishReceive/teardown 干扰新 turn。
+      if (_turnDc != dc) return;
       if (state == rtc.RTCDataChannelState.RTCDataChannelOpen) {
         _idleTimer?.cancel();
         if (_isSender) {
@@ -250,10 +264,11 @@ class ChatFileTransferManager {
         }
       } else if (state == rtc.RTCDataChannelState.RTCDataChannelClosed) {
         if (!_isSender) _finishReceive();
-        _teardown();
+        _endTurn();
       }
     });
     dc.messageStream.listen((message) {
+      if (_turnDc != dc) return;
       _idleTimer?.cancel();
       if (!_isSender && message.isBinary) {
         _receiveChunk(message.binary);
@@ -279,23 +294,26 @@ class ChatFileTransferManager {
             bytes[off + 3];
         if (off + 4 + len > bytes.length) break; // 不完整帧，丢弃尾部
         final frame = Uint8List.sublistView(bytes, off, off + 4 + len);
-        while (_dc != null &&
-            (_dc!.bufferedAmount ?? 0) > _bufferedAmountLow) {
+        while (_turnDc != null &&
+            (_turnDc!.bufferedAmount ?? 0) > _bufferedAmountLow) {
           await Future<void>.delayed(const Duration(milliseconds: 50));
         }
-        _dc?.send(rtc.RTCDataChannelMessage.fromBinary(frame));
+        _turnDc?.send(rtc.RTCDataChannelMessage.fromBinary(frame));
         sent += 4 + len;
         off += 4 + len;
         _current!.transferredBytes = sent;
         onProgress?.call(_current!, sent / length, kTransferring);
       }
       // 结束标记（空帧）。
-      if (_dc != null) {
-        _dc!.send(rtc.RTCDataChannelMessage.fromBinary(Uint8List(0)));
+      if (_turnDc != null) {
+        _turnDc!.send(rtc.RTCDataChannelMessage.fromBinary(Uint8List(0)));
         onProgress?.call(_current!, 1.0, kDone);
       }
+      // 发送完成 → 结束当前 turn（放行排队中的下一个传输）。
+      _endTurn();
     } catch (e) {
       if (_current != null) onProgress?.call(_current!, 0, kFailed);
+      _endTurn();
     }
   }
 
@@ -348,27 +366,42 @@ class ChatFileTransferManager {
       });
 
       if (_current != null) onProgress?.call(_current!, 1.0, kDone);
+      // 接收完成 → 结束当前 turn（放行排队中的下一个传输）。
+      _endTurn();
     } catch (e) {
       onDiag?.call('file:receive-fail', {'path': plainPath, 'err': '$e'});
       if (_current != null) onProgress?.call(_current!, 0, kFailed);
+      _endTurn();
     }
   }
 
-  void _teardown() {
+  /// 结束当前 turn：关闭 PC/DC、清空状态、完成 turn 信号放行队列。
+  /// 与 _teardown（仅连接断开时用）不同：_endTurn 是数据层面完成/失败后调用，
+  /// 必须完成 _turnDone 让排队中的下一个传输开始。
+  void _endTurn() {
     _idleTimer?.cancel();
     try {
-      _dc?.close();
+      _turnDc?.close();
     } catch (_) {}
-    _dc = null;
-    _pc?.close();
-    _pc = null;
+    _turnDc = null;
+    _turnPc?.close();
+    _turnPc = null;
     _current = null;
     _receivePlainPath = null;
     _receiveAesKey = null;
     _receivedCiphertext.clear();
+    if (_turnDone != null && !_turnDone!.isCompleted) {
+      _turnDone!.complete();
+    }
+    _turnDone = null;
+  }
+
+  /// 开始一个新 turn：登记完成信号（供后续传输 await）。
+  void _startTurn() {
+    _turnDone = Completer<void>();
   }
 
   void dispose() {
-    _teardown();
+    _endTurn();
   }
 }
