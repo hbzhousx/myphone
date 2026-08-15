@@ -309,8 +309,12 @@ class ChatFileTransferManager {
         _turnDc!.send(rtc.RTCDataChannelMessage.fromBinary(Uint8List(0)));
         onProgress?.call(_current!, 1.0, kDone);
       }
-      // 发送完成 → 结束当前 turn（放行排队中的下一个传输）。
-      _endTurn();
+      // ★发送完成 ≠ turn 结束：不能在这里 _endTurn 关 PC——接收方可能仍在
+      //   收数据（PC 刚 Connected）。提前关 PC → 接收方 PC 立即 Closed/Disconnected
+      //   → _finishReceive 拿到空数据 → 0 字节文件无法预览。
+      //   正确时机：接收方收完空帧 → _finishReceive 写盘 → 主动关 DC →
+      //   发送方看到 DC Closed → _setupDataChannel 里 _endTurn 放行队列。
+      // 兜底：对端异常关闭时 DC Closed 也会触发 _endTurn；此处仅失败才立即结束。
     } catch (e) {
       if (_current != null) onProgress?.call(_current!, 0, kFailed);
       _endTurn();
