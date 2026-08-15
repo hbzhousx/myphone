@@ -268,6 +268,24 @@ class ApiClient {
     return Uint8List.fromList(bytes);
   }
 
+  /// 删除服务器上的附件密文（接收方下载完成并本地解密写盘后调用）。
+  /// 服务器文件不存在时返回 200（幂等），404 不视为错误。
+  Future<void> deleteAttachment(String url) async {
+    final uri = url.startsWith('http')
+        ? Uri.parse(url)
+        : Uri.parse(ServerConfig.httpBase + (url.startsWith('/') ? url : '/$url'));
+    final request = http.Request('DELETE', uri);
+    request.headers.addAll(await _authHeaders());
+    final streamed = await _client.send(request);
+    if (streamed.statusCode >= 400 && streamed.statusCode != 404) {
+      throw ApiException(
+        statusCode: streamed.statusCode,
+        message: 'attachment delete failed: ${streamed.statusCode}',
+      );
+    }
+    await streamed.stream.drain();
+  }
+
   void dispose() => _client.close();
 }
 

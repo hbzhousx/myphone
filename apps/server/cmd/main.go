@@ -75,6 +75,7 @@ func main() {
 		r.Post("/contacts/discover", api.AuthMiddleware(contactDiscovery.Discover))
 		r.Post("/attachments", api.AuthMiddleware(attachmentsHandler.Upload))
 		r.Get("/attachments/{id}", api.AuthMiddleware(attachmentsHandler.Download))
+		r.Delete("/attachments/{id}", api.AuthMiddleware(attachmentsHandler.Delete))
 	})
 
 	r.Get("/ws", api.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {

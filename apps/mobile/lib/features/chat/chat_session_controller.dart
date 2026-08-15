@@ -386,7 +386,6 @@ class ChatSessionController {
       } else {
         _reportDiag('file:http-no-url', {'msg': messageId, 'hasUrl': downloadUrl != null});
       }
-      if (!inserted) _reportDiag('file:http-insert-flag', {'msg': messageId});
     }
     await _touchConversation(body, messageId);
 
@@ -579,8 +578,6 @@ class ChatSessionController {
     required List<int> aesKey,
     required List<int>? aesNonce,
   }) {
-    // 诊断：确认下载函数被调用（build 67 前无此日志，怀疑调用未到达）。
-    _reportDiag('file:http-dl-entry', {'msg': messageId, 'url': url});
     // 每个附件一个独立异步任务，失败不影响其他附件/消息。
     // ignore: discarded_futures
     _downloadAttachment(
@@ -634,6 +631,13 @@ class ChatSessionController {
       'plainBytes': plainBytes.length,
       'exists': plainFile.existsSync(),
     });
+
+    // 下载完成即删服务器密文（释放空间；失败不影响本地，忽略）。
+    try {
+      await _apiClient.deleteAttachment(url);
+    } catch (e) {
+      _reportDiag('file:http-delete-fail', {'msg': messageId, 'err': '$e'});
+    }
   }
 
   /// Signal 式独立下载扫描：扫描本会话所有 status=downloading 的附件并逐个下载。
@@ -877,7 +881,6 @@ class ChatSessionController {
       nonce: aesNonce,
       aad: Uint8List.fromList('myphone-file-v1'.codeUnits),
     );
-    _reportDiag('file:http-upload', {'msg': messageId, 'plainBytes': plainBytes.length, 'encBytes': ciphertext.length});
 
     // 2) 上传密文到服务器（Signal 附件 CDN 同理：只存密文）。拿下载 URL。
     String attachmentUrl;

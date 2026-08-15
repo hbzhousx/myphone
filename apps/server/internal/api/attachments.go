@@ -75,7 +75,7 @@ func (h *AttachmentsHandler) Upload(w http.ResponseWriter, r *http.Request) {
 // Download 流式返回密文文件（服务器不见明文）。
 func (h *AttachmentsHandler) Download(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if id == "" || len(id) != 64 {
+	if !validAttachmentID(id) {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
@@ -83,6 +83,27 @@ func (h *AttachmentsHandler) Download(w http.ResponseWriter, r *http.Request) {
 	// ServeFile 自动处理 stat/Content-Length/Range；文件缺失时返回 404。
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeFile(w, r, path)
+}
+
+// Delete 删除密文文件。接收方下载完成并本地解密写盘后调用，释放服务器空间。
+// 文件不存在时也返回 200（幂等：重复删除/已清理不算错误）。
+func (h *AttachmentsHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if !validAttachmentID(id) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	path := filepath.Join(h.dir, id)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		http.Error(w, `{"error":"delete failed"}`, http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{"deleted": id})
+}
+
+func validAttachmentID(id string) bool {
+	return id != "" && len(id) == 64
 }
 
 func newAttachmentID() string {
