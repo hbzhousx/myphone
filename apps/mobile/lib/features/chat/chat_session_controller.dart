@@ -873,8 +873,6 @@ class ChatSessionController {
     });
 
     // 1) 读源文件 → 整文件 AES-GCM 加密（服务器中转只传密文，服务器不见明文）。
-    // 诊断：读文件+加密（定位 sendFile 卡在读文件还是加密）。
-    _reportDiag('file:http-encrypt-start', {'msg': messageId, 'size': await src.length()});
     final plainBytes = await src.readAsBytes();
     final plaintextSha = crypto.sha256.convert(plainBytes).toString();
     final ciphertext = await CryptoManager.aesGcmEncrypt(
@@ -883,10 +881,8 @@ class ChatSessionController {
       nonce: aesNonce,
       aad: Uint8List.fromList('myphone-file-v1'.codeUnits),
     );
-    _reportDiag('file:http-encrypted', {'msg': messageId, 'plainBytes': plainBytes.length, 'encBytes': ciphertext.length});
 
     // 2) 上传密文到服务器（Signal 附件 CDN 同理：只存密文）。拿下载 URL。
-    _reportDiag('file:http-upload-start', {'msg': messageId});
     String attachmentUrl;
     String attachmentId;
     try {
@@ -969,7 +965,6 @@ class ChatSessionController {
         if (initPayload != null) 'init_payload': initPayload,
       },
     ));
-    _reportDiag('file:http-sent', {'msg': messageId});
 
     // 7) 本地附件表：local_plain_path 指向源文件（发件方直接可预览）。
     await _db.insertAttachment({
