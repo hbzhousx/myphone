@@ -90,14 +90,35 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final rows = await DatabaseManager.instance
           .getMessages(_conversationId, limit: 200);
       if (!mounted) return;
+      // 诊断：上报查询的 conversation_id + contactId + 行数，定位"入库但聊天页空白"。
+      try {
+        final controller = await ref
+            .read(chatStateProvider.notifier)
+            .controllerFor(
+              remoteUserId: widget.contactId,
+              conversationId: _conversationId,
+            );
+        controller.reportDiagnostic('ui:loadMessages', {
+          'conv': _conversationId,
+          'contactId': widget.contactId,
+          'rows': rows.length,
+        });
+      } catch (_) {}
       // 为附件消息补本地明文路径（供图片缩略图/文件卡片展示）。
+      // ★getAttachment 必须容错：任一条附件查询异常都不能卡死整个刷新
+      //   （否则 withPaths 构建中断 → setState 不执行 → 消息全不显示、白屏）。
       final withPaths = <Map<String, dynamic>>[];
       for (final msg in rows) {
         final transferId = msg['transfer_id'] as String?;
         if (transferId != null) {
-          final attach =
-              await DatabaseManager.instance.getAttachment(transferId);
-          msg['_attachment_path'] = attach?['local_plain_path'] as String?;
+          try {
+            final attach =
+                await DatabaseManager.instance.getAttachment(transferId);
+            msg['_attachment_path'] =
+                attach?['local_plain_path'] as String?;
+          } catch (e) {
+            msg['_attachment_path'] = null;
+          }
         }
         withPaths.add(msg);
       }

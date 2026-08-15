@@ -412,6 +412,11 @@ class ChatSessionController {
 
   /// 诊断上报：把接收处理的进度通过 chatDiag 发到服务器日志（服务器不转发）。
   /// 用于定位"消息收到但不显示"——每步调用，服务器 [CHAT-DIAG] 能看走到哪。
+  /// 公开诊断上报（供 chat_screen 等 UI 层调用）。
+  void reportDiagnostic(String step, Map<String, dynamic> data) {
+    _reportDiag(step, data);
+  }
+
   void _reportDiag(String step, Map<String, dynamic> data) {
     try {
       _signaling.sendChatSignal(ChatSignal(
