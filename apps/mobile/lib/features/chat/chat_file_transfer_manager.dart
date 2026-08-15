@@ -79,6 +79,14 @@ class ChatFileTransferManager {
     required Uint8List aesKey,
     required String encPath,
   }) async {
+    // ★先清理旧 PC：与 handleOffer 对称。发送完成后 DataChannel 保持打开，
+    //   _pc 不置空；下一次 sendFile 的 _createPeerConnection() 命中 `_pc != null`
+    //   直接复用残留/半坏 PC → 不再收集 ICE 候选 → 接收方只有自己侧候选，
+    //   ICE 永远 Failed → 连发两张图第二张收不到。每次发送都用全新 PC。
+    if (_pc != null) {
+      onDiag?.call('file:reuse-pc-send', {'transferId': transferId});
+      _teardown();
+    }
     final file = File(filePath);
 
     // 加密源文件到本地密文（流式分块）。块格式：[4B len][nonce(12)][ciphertext||mac]，
