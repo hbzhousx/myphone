@@ -2,6 +2,7 @@
 library;
 
 import 'dart:io';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart' as sqflite;
@@ -457,6 +458,11 @@ class DatabaseManager {
     final now = DateTime.now().millisecondsSinceEpoch;
     final rows = await db.query('messages',
         where: 'expires_at IS NOT NULL AND expires_at <= ?', whereArgs: [now]);
+    // 诊断：上报被删的消息（id + expires_at + expires_in_seconds），定位"消息消失"。
+    if (rows.isNotEmpty) {
+      debugPrint('[DB] deleteExpiredMessages removing ${rows.length}: '
+          '${rows.map((r) => '${r['id']}(exp=${r['expires_at']},ein=${r['expires_in_seconds']})').join(',')}');
+    }
     for (final row in rows) {
       final id = row['id'] as String;
       await db.delete('messages', where: 'id = ?', whereArgs: [id]);

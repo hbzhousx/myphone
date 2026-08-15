@@ -179,6 +179,39 @@ public class MainActivity extends FlutterFragmentActivity {
                         result.notImplemented();
                 }
             });
+
+        // 聊天附件：用系统应用打开本地文件（FileProvider + ACTION_VIEW）。
+        new MethodChannel(messenger, "myphone/open")
+            .setMethodCallHandler((call, result) -> {
+                if ("openFile".equals(call.method)) {
+                    String path = call.argument("path");
+                    String mime = call.argument("mime");
+                    if (path == null) {
+                        result.success(false);
+                        return;
+                    }
+                    try {
+                        File file = new File(path);
+                        if (!file.exists()) {
+                            result.success(false);
+                            return;
+                        }
+                        Uri contentUri = FileProvider.getUriForFile(
+                            this, getPackageName() + ".fileprovider", file);
+                        Intent intent = new Intent(Intent.ACTION_VIEW);
+                        intent.setDataAndType(contentUri, mime);
+                        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(intent);
+                        result.success(true);
+                    } catch (Exception e) {
+                        android.util.Log.w("MainActivity", "open file failed: " + e);
+                        result.success(false);
+                    }
+                } else {
+                    result.notImplemented();
+                }
+            });
     }
 
     /** 是否已加入"忽略电池优化"白名单。 */

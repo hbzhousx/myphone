@@ -56,6 +56,7 @@ class ChatSessionController {
           ));
         },
         onProgress: _onFileProgress,
+        onDiag: (step, data) => _reportDiag(step, data),
       );
 
   /// 发送文本/表情消息。
@@ -307,7 +308,10 @@ class ChatSessionController {
         {'msg': messageId, 'kind': kind, 'bodyLen': body.length, 'body': body.substring(0, body.length > 30 ? 30 : body.length)});
 
     // 附件元数据消息（含 transfer_id）：落附件表，等数据通道到达。
+    // ★必须存 transfer_id：否则 _loadMessages 里 msg['transfer_id'] 为 null，
+    //   查不到附件 → _attachment_path 不设置 → 接收方无法预览图片/文件。
     final isFile = parsed.containsKey('transfer_id');
+    final transferId = parsed['transfer_id'] as String?;
     final now = DateTime.now().millisecondsSinceEpoch;
     await _db.insertMessage({
       'id': messageId,
@@ -320,6 +324,7 @@ class ChatSessionController {
       'expires_at': expiresIn > 0 ? now + expiresIn * 1000 : null,
       'received_at': now,
       'created_at': now,
+      if (transferId != null) 'transfer_id': transferId,
     });
     debugPrint('[RECV] incoming row inserted');
     _reportDiag('incoming:inserted', {'msg': messageId, 'kind': kind});
@@ -527,6 +532,11 @@ class ChatSessionController {
     final messageId = _newId();
     final transferId = messageId; // 附件与消息共用 id
     final aesKey = CryptoManager.randomBytes(32);
+    _reportDiag('file:aes-key-send', {
+      'msg': messageId,
+      'len': aesKey.length,
+      'fp': _fp(aesKey),
+    });
     final dir = await getApplicationDocumentsDirectory();
     final encPath =
         '${dir.path}/chat_media/$_conversationId/$messageId.enc';
@@ -618,12 +628,24 @@ class ChatSessionController {
     final payload = signal.payload ?? const {};
     final transferId = payload['transfer_id'] as String?;
     final sdp = payload['sdp'] as String?;
-    if (transferId == null || sdp == null) return;
+    if (transferId == null || sdp == null) {
+      _reportDiag('file:offer-bad', {'transferId': transferId, 'hasSdp': sdp != null});
+      return;
+    }
 
     final attach = await _db.getAttachment(transferId);
-    if (attach == null) return;
+    if (attach == null) {
+      _reportDiag('file:offer-no-attach', {'transferId': transferId});
+      return;
+    }
     final aesKey = attach['aes_key'] as List<int>?;
     if (aesKey == null) return;
+    // 诊断：上报接收方解密用的 aesKey 指纹（对比发送方加密 key，定位 MAC 失败）。
+    _reportDiag('file:aes-key', {
+      'msg': transferId,
+      'len': aesKey.length,
+      'fp': _fp(Uint8List.fromList(aesKey)),
+    });
 
     await _db.updateAttachmentStatus(transferId, 'transferring');
     await _db.updateMessageStatus(transferId, 'pending');
@@ -664,6 +686,14 @@ class ChatSessionController {
   Future<void> _onFileProgress(
       ChatFileTransfer transfer, double progress, String status) async {
     final messageId = transfer.transferId;
+    // 诊断：上报数据通道传输结果（定位接收方无法预览图片——文件是否到达）。
+    _reportDiag('file:progress', {
+      'msg': messageId,
+      'status': status,
+      'progress': progress,
+      'path': transfer.filePath,
+      'exists': File(transfer.filePath).existsSync(),
+    });
     if (status == kDone) {
       await _db.updateMessageStatus(messageId, 'delivered');
       await _db.updateAttachmentStatus(messageId, 'done');

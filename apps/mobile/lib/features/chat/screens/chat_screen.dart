@@ -6,6 +6,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mime/mime.dart';
@@ -18,14 +19,14 @@ import '../chat_state.dart';
 import '../widgets/message_bubble.dart';
 
 /// 阅后即焚可选项：秒数 → 显示文案。
+/// 最小从 1 小时起（短暂选项会让消息在几秒/几分钟内消失，用户以为消息丢失）。
+/// 默认「关」，选择非「关」项需勾选确认。
 const List<(int, String)> _disappearOptions = [
   (0, '关'),
-  (5, '5秒'),
-  (30, '30秒'),
-  (60, '1分钟'),
   (3600, '1小时'),
   (86400, '24小时'),
   (604800, '1周'),
+  (2592000, '1个月'),
 ];
 
 class ChatScreen extends ConsumerStatefulWidget {
@@ -89,33 +90,59 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     try {
       final rows = await DatabaseManager.instance
           .getMessages(_conversationId, limit: 200);
-      if (!mounted) return;
-      // 诊断：上报查询的 conversation_id + contactId + 行数，定位"入库但聊天页空白"。
+      // 诊断：getMessages 后立即上报（fire-and-forget，不阻塞），确认 mounted 状态。
       try {
-        final controller = await ref
+        ref
             .read(chatStateProvider.notifier)
             .controllerFor(
               remoteUserId: widget.contactId,
               conversationId: _conversationId,
-            );
-        controller.reportDiagnostic('ui:loadMessages', {
-          'conv': _conversationId,
-          'contactId': widget.contactId,
-          'rows': rows.length,
-        });
+            )
+            .then((c) => c.reportDiagnostic('ui:fetch',
+                {'conv': _conversationId, 'mounted': mounted, 'rows': rows.length,
+                 'tidTypes': rows.map((m) {
+                    final t = m['transfer_id'];
+                    return t == null ? 'null' : (t is String ? 'str' : t.runtimeType.toString());
+                  }).toList().join(',')}))
+            .catchError((_) {});
       } catch (_) {}
+      if (!mounted) return;
       // 为附件消息补本地明文路径（供图片缩略图/文件卡片展示）。
       // ★getAttachment 必须容错：任一条附件查询异常都不能卡死整个刷新
       //   （否则 withPaths 构建中断 → setState 不执行 → 消息全不显示、白屏）。
       final withPaths = <Map<String, dynamic>>[];
-      for (final msg in rows) {
-        final transferId = msg['transfer_id'] as String?;
+      for (final row in rows) {
+        // ★必须拷贝为可写 map：sqflite 返回的 QueryRow 是只读的，
+        //   直接 `msg['_attachment_path'] = ...` 会抛
+        //   `Unsupported operation: read-only` → 中断循环 → setState 不执行 → 白屏。
+        final msg = Map<String, dynamic>.from(row);
+        // ★transfer_id 类型安全：DB 里可能是 int/其他，直接 as String? 会抛
+        //   _TypeError 中断整个循环 → setState 不执行 → 白屏。安全转换。
+        final transferIdRaw = msg['transfer_id'];
+        final transferId =
+            transferIdRaw is String ? transferIdRaw : null;
         if (transferId != null) {
           try {
             final attach =
                 await DatabaseManager.instance.getAttachment(transferId);
             msg['_attachment_path'] =
                 attach?['local_plain_path'] as String?;
+            // 诊断：附件消息的 local_plain_path + 文件是否存在（定位图片无法预览）。
+            final p = attach?['local_plain_path'] as String?;
+            if (p != null) {
+              try {
+                ref
+                    .read(chatStateProvider.notifier)
+                    .controllerFor(
+                      remoteUserId: widget.contactId,
+                      conversationId: _conversationId,
+                    )
+                    .then((c) => c.reportDiagnostic('ui:attach',
+                        {'msg': msg['id'], 'tid': transferId, 'path': p,
+                         'exists': File(p).existsSync()}))
+                    .catchError((_) {});
+              } catch (_) {}
+            }
           } catch (e) {
             msg['_attachment_path'] = null;
           }
@@ -126,10 +153,34 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         _messages = withPaths;
         _loading = false;
       });
+      // 诊断：setState 后 fire-and-forget 上报（不 await controllerFor，避免阻塞）。
+      try {
+        ref
+            .read(chatStateProvider.notifier)
+            .controllerFor(
+              remoteUserId: widget.contactId,
+              conversationId: _conversationId,
+            )
+            .then((c) => c.reportDiagnostic('ui:setState',
+                {'conv': _conversationId, 'n': withPaths.length}))
+            .catchError((_) {});
+      } catch (_) {}
       _maybeReadIncoming(rows);
       _syncDisappearSetting();
-    } catch (e) {
+    } catch (e, st) {
       debugPrint('[CHAT] load messages failed: $e');
+      // 诊断：上报 _loadMessages 异常（fire-and-forget）。
+      try {
+        ref
+            .read(chatStateProvider.notifier)
+            .controllerFor(
+              remoteUserId: widget.contactId,
+              conversationId: _conversationId,
+            )
+            .then((c) => c.reportDiagnostic('ui:loadError',
+                {'conv': _conversationId, 'err': '$e', 'stack': '$st'}))
+            .catchError((_) {});
+      } catch (_) {}
       if (mounted) setState(() => _loading = false);
     }
   }
@@ -431,6 +482,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   /// 打开已接收的文件/图片（本地解密后路径）。
+  /// 图片/视频 → 应用内预览；文件 → 原生系统打开（FileProvider + ACTION_VIEW）。
   Future<void> _openAttachment(String transferId) async {
     try {
       final attach = await DatabaseManager.instance.getAttachment(transferId);
@@ -441,13 +493,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         return;
       }
       if (!mounted) return;
-      // 图片/视频预览大图，文件用系统分享。
-      await showDialog<void>(
-        context: context,
-        builder: (ctx) => Dialog(
-          child: InteractiveViewer(
-            child: Image.file(
-              File(path),
+      final kind = attach['kind'] as String? ?? 'file';
+
+      if (kind == 'image' || kind == 'video') {
+        // 图片/视频预览大图。
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => Dialog(
+            child: InteractiveViewer(
+              child: Image.file(
+                File(path),
               fit: BoxFit.contain,
               errorBuilder: (_, __, ___) => const SizedBox(
                 height: 120,
@@ -456,15 +511,47 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
           ),
         ),
-      );
+        );
+      } else {
+        // 文件 → 原生系统打开（MainActivity 用 FileProvider 生成 content:// 后
+        // ACTION_VIEW，对齐 Signal 的 Intent.ACTION_VIEW + PartProvider）。
+        final mime = attach['mime_type'] as String? ?? 'application/octet-stream';
+        final ok = await _openFileNative(path, mime);
+        if (!ok && mounted) _showSendError('无法用其他应用打开该文件');
+      }
     } catch (e) {
       debugPrint('[CHAT] open attachment failed: $e');
+    }
+  }
+
+  /// 经 MethodChannel 调原生打开文件（FileProvider + ACTION_VIEW）。
+  static const _openChannel = MethodChannel('myphone/open');
+  Future<bool> _openFileNative(String path, String mime) async {
+    try {
+      final ok = await _openChannel
+          .invokeMethod<bool>('openFile', {'path': path, 'mime': mime});
+      return ok ?? false;
+    } catch (e) {
+      debugPrint('[CHAT] native open failed: $e');
+      return false;
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    // 诊断：build 时 fire-and-forget 上报 _messages 数量（确认 setState 后是否有值）。
+    try {
+      ref
+          .read(chatStateProvider.notifier)
+          .controllerFor(
+            remoteUserId: widget.contactId,
+            conversationId: _conversationId,
+          )
+          .then((c) => c.reportDiagnostic('ui:build',
+              {'conv': _conversationId, 'msgs': _messages.length, 'loading': _loading}))
+          .catchError((_) {});
+    } catch (_) {}
 
     return Scaffold(
       appBar: AppBar(
@@ -473,17 +560,39 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           // 阅后即焚设置：变更后发信令给对端同步会话默认值。
           PopupMenuButton<int>(
             initialValue: _disappearSeconds,
-            onSelected: (seconds) {
+            onSelected: (seconds) async {
+              // 选非「关」项需勾选确认（说明消息会定时删除），避免误触后消息消失。
+              if (seconds > 0) {
+                final label = _disappearOptions
+                    .firstWhere((o) => o.$1 == seconds)
+                    .$2;
+                final confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('开启阅后即焚？'),
+                    content: Text('开启后，本会话的消息将在 $label 后自动删除（两端）。确定开启？'),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: const Text('取消'),
+                      ),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        child: const Text('开启'),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirmed != true || !mounted) return;
+              }
               setState(() => _disappearSeconds = seconds);
-              () async {
-                final controller = await ref
-                    .read(chatStateProvider.notifier)
-                    .controllerFor(
-                      remoteUserId: widget.contactId,
-                      conversationId: _conversationId,
-                    );
-                controller.sendDisappearingSetting(seconds);
-              }();
+              final controller = await ref
+                  .read(chatStateProvider.notifier)
+                  .controllerFor(
+                    remoteUserId: widget.contactId,
+                    conversationId: _conversationId,
+                  );
+              controller.sendDisappearingSetting(seconds);
             },
             itemBuilder: (context) => [
               for (final (seconds, label) in _disappearOptions)

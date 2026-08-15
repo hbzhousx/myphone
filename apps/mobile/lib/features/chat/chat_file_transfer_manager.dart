@@ -52,6 +52,9 @@ class ChatFileTransferManager {
   /// 把聊天信令发到 WS 的回调（type ∈ chatFileOffer/Answer/Ice）。
   final void Function(String type, Map<String, dynamic> payload)? onSignal;
 
+  /// 诊断上报回调（fire-and-forget，服务器 [CHAT-DIAG] 可见）。
+  final void Function(String step, Map<String, dynamic> data)? onDiag;
+
   rtc.RTCPeerConnection? _pc;
   rtc.RTCDataChannel? _dc;
   ChatFileTransfer? _current;
@@ -63,7 +66,7 @@ class ChatFileTransferManager {
   Uint8List? _receiveAesKey;
   final List<int> _receivedCiphertext = [];
 
-  ChatFileTransferManager({this.onProgress, this.onSignal});
+  ChatFileTransferManager({this.onProgress, this.onSignal, this.onDiag});
 
   /// 发送侧：加密源文件 → 建数据通道 → 发 offer。
   /// [aesKey] 逐文件随机 AES-256-GCM 密钥（32B），[encPath] 本地密文路径。
@@ -137,6 +140,13 @@ class ChatFileTransferManager {
     required String filePath,
     required Uint8List aesKey,
   }) async {
+    // ★先清理旧 PC：前一次传输若未 teardown（连接未断开但传输失败），_pc 残留，
+    //   本会话复用旧 PC → 不响应新 offer → 无 answer → 数据通道不建立 → 无法预览。
+    if (_pc != null) {
+      onDiag?.call('file:reuse-pc', {'transferId': transferId});
+      _teardown();
+    }
+    onDiag?.call('file:offer-start', {'transferId': transferId});
     _current = ChatFileTransfer(
       transferId: transferId,
       filePath: filePath,
@@ -183,6 +193,11 @@ class ChatFileTransferManager {
   Future<rtc.RTCPeerConnection> _createPeerConnection() async {
     if (_pc != null) return _pc!;
     final policy = await determineIcePolicy();
+    onDiag?.call('file:pc', {
+      'policy': policy.name,
+      'iceServers': WebrtcManager.defaultIceServers.map((s) => s['urls']).toList().join(','),
+      'turnConfigured': WebrtcManager.turnUrl.isNotEmpty,
+    });
     final config = <String, dynamic>{
       'iceServers': WebrtcManager.defaultIceServers,
       'sdpSemantics': 'unified-plan',
@@ -190,6 +205,10 @@ class ChatFileTransferManager {
     };
     final pc = await rtc.createPeerConnection(config);
     pc.onIceCandidate = (candidate) {
+      onDiag?.call('file:ice-cand', {
+        'candidate': candidate.candidate ?? 'null',
+        'has': candidate.candidate != null && candidate.candidate!.isNotEmpty,
+      });
       if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
       onSignal?.call('chatFileIce', {
         'transfer_id': _current?.transferId,
@@ -198,7 +217,11 @@ class ChatFileTransferManager {
         'sdp_mline_index': candidate.sdpMLineIndex,
       });
     };
+    pc.onIceConnectionState = (state) {
+      onDiag?.call('file:ice-state', {'state': state.name});
+    };
     pc.onConnectionState = (state) {
+      onDiag?.call('file:conn-state', {'state': state.name});
       if (state == rtc.RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
         if (_current != null) {
           onProgress?.call(_current!, 0, kFailed);
@@ -235,22 +258,26 @@ class ChatFileTransferManager {
     final file = File(_current!.filePath);
     final length = _current!.totalBytes;
     var sent = 0;
-    final stream = file.openRead();
+    // ★按 .enc 的帧发送：.enc 已是 `[4B len][密文帧]`，不能按 openRead 的
+    //   chunk 重新分帧（chunk 边界 ≠ 帧边界 → 接收方按 len 解析错位 → MAC 失败）。
+    //   逐帧读取，每帧完整发到数据通道。
+    final bytes = await file.readAsBytes();
     try {
-      await for (final chunk in stream) {
+      var off = 0;
+      while (off + 4 <= bytes.length) {
+        final len = (bytes[off] << 24) |
+            (bytes[off + 1] << 16) |
+            (bytes[off + 2] << 8) |
+            bytes[off + 3];
+        if (off + 4 + len > bytes.length) break; // 不完整帧，丢弃尾部
+        final frame = Uint8List.sublistView(bytes, off, off + 4 + len);
         while (_dc != null &&
             (_dc!.bufferedAmount ?? 0) > _bufferedAmountLow) {
           await Future<void>.delayed(const Duration(milliseconds: 50));
         }
-        final len = chunk.length;
-        final frame = Uint8List(4 + len);
-        frame[0] = (len >> 24) & 0xFF;
-        frame[1] = (len >> 16) & 0xFF;
-        frame[2] = (len >> 8) & 0xFF;
-        frame[3] = len & 0xFF;
-        frame.setRange(4, 4 + len, chunk);
         _dc?.send(rtc.RTCDataChannelMessage.fromBinary(frame));
-        sent += len;
+        sent += 4 + len;
+        off += 4 + len;
         _current!.transferredBytes = sent;
         onProgress?.call(_current!, sent / length, kTransferring);
       }
@@ -265,8 +292,10 @@ class ChatFileTransferManager {
   }
 
   void _receiveChunk(Uint8List data) {
-    // 空帧 = 传输结束。
-    if (data.length == 4 && data.every((b) => b == 0)) {
+    // 空帧 = 传输结束。发送方用 Uint8List(0)（0 字节）标记结束，
+    // 兼容旧 4 字节全 0 空帧。否则接收方收完字节后等不到结束帧，
+    // 连接断开 → _finishReceive 不执行 → 文件不写 → 预览失败。
+    if (data.isEmpty || (data.length == 4 && data.every((b) => b == 0))) {
       _finishReceive();
       return;
     }
@@ -302,9 +331,17 @@ class ChatFileTransferManager {
         off += 4 + len;
       }
       await sink.close();
+      // 诊断：接收方写盘完成（路径 + 字节数 + 文件是否存在）。
+      onDiag?.call('file:receive-done', {
+        'path': plainPath,
+        'bytes': ciphertext.length,
+        'decoded': off,
+        'exists': plainFile.existsSync(),
+      });
 
       if (_current != null) onProgress?.call(_current!, 1.0, kDone);
     } catch (e) {
+      onDiag?.call('file:receive-fail', {'path': plainPath, 'err': '$e'});
       if (_current != null) onProgress?.call(_current!, 0, kFailed);
     }
   }

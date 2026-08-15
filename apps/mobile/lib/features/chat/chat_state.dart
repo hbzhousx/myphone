@@ -55,23 +55,41 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
   Future<void> _init() async {
     try {
       _localUserId = await AuthGuard.getUserId() ?? '';
-    } catch (_) {
+      _diag('init:userId', {'id': _localUserId ?? ''});
+    } catch (e) {
       _localUserId = '';
+      _diag('init:userId-fail', {'err': '$e'});
     }
     try {
       await _sessions.publishPrekeyBundle();
+      _diag('init:prekey-ok', {});
     } catch (e) {
       // 发布失败（未登录/网络）不阻塞聊天，会话建立时会重试。打日志便于定位。
       debugPrint('[CHAT-STATE] publishPrekeyBundle failed: $e');
+      _diag('init:prekey-fail', {'err': '$e'});
     }
     try {
       await _signaling.connect();
-    } catch (_) {
+      _diag('init:connect-ok', {});
+    } catch (e) {
       // 连接失败不阻塞：常驻桥接模式下由服务自愈重连。
+      _diag('init:connect-fail', {'err': '$e'});
     }
     _chatSub = _signaling.chatSignals.listen(_onChatSignal);
-    _expiryTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      _db.deleteExpiredMessages();
+    _diag('init:done', {});
+    _expiryTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      final n = await _db.deleteExpiredMessages();
+      if (n > 0) {
+        // 诊断：阅后即焚删除发生时上报（定位"消息莫名消失"）。
+        try {
+          _signaling.sendChatSignal(ChatSignal(
+            type: ChatSignalType.chatDiag,
+            fromUserId: _localUserId ?? '',
+            toUserId: _localUserId ?? '',
+            payload: {'step': 'expiry:deleted', 'count': n},
+          ));
+        } catch (_) {}
+      }
     });
     _db.deleteExpiredMessages();
   }
@@ -88,6 +106,18 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
   /// 当前打开会话（由 UI 进入聊天页时调用）。
   void setActiveConversation(String? conversationId) {
     state = state.copyWith(activeConversationId: conversationId);
+  }
+
+  /// 诊断上报（fire-and-forget，不阻塞 _init）。
+  void _diag(String step, Map<String, dynamic> data) {
+    try {
+      _signaling.sendChatSignal(ChatSignal(
+        type: ChatSignalType.chatDiag,
+        fromUserId: _localUserId ?? '',
+        toUserId: _localUserId ?? '',
+        payload: {'step': step, ...data},
+      ));
+    } catch (_) {}
   }
 
   /// 获取（或懒建）某会话的控制器。等待 _init 完成以确保 _localUserId 非空。
