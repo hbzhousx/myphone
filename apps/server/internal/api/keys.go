@@ -29,6 +29,15 @@ func (h *KeysHandler) UploadPreKeys(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value("userID").(string)
 	var req PreKeyRequest
 	json.NewDecoder(r.Body).Decode(&req)
+	// ★关键修复：上传新批次前先清掉该用户的旧 OTP，避免孤儿 OTP 残留。
+	// 旧批次（尤其 key_id 与当前批次不同的孤儿）留在服务器会被 GetKeyBundle 按
+	// key_id 取到，但客户端本地已无对应私钥 → 发起方用孤儿公钥做 DH4、响应方
+	// 缺私钥 → 两端 X3DH 失配 → 消息解密失败(MAC) / 灰块。
+	// 清旧再插保证服务器永远只有当前批次，GetKeyBundle 取到的必是响应方有私钥的。
+	if _, err := h.db.Exec(`DELETE FROM pre_keys WHERE user_id = $1`, userID); err != nil {
+		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
+		return
+	}
 	for _, pk := range req.PreKeys {
 		h.db.Exec(`INSERT INTO pre_keys (user_id, key_id, public_key) VALUES ($1,$2,$3)`, userID, pk.KeyID, pk.PublicKey)
 	}
@@ -55,6 +64,33 @@ func (h *KeysHandler) GetPreKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"pre_keys": preKeys})
+}
+
+// UpdateIdentityRequest 携带新的 identity_public_key。
+type UpdateIdentityRequest struct {
+	IdentityPublicKey string `json:"identity_public_key"`
+}
+
+// UpdateIdentity 更新当前用户的 identity_public_key。
+// ★关键：登录/启动后同步本地 identity 到服务器，避免重装/清数据后本地新 identity
+//   与服务器旧值不一致 → 对端取 bundle 拿旧 IK，本机用新 IK → X3DH DH2 不对称
+//   → 每条消息解密 MAC 失败。
+func (h *KeysHandler) UpdateIdentity(w http.ResponseWriter, r *http.Request) {
+	userID := r.Context().Value("userID").(string)
+	var req UpdateIdentityRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.IdentityPublicKey == "" {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+	if _, err := h.db.Exec(
+		`UPDATE users SET identity_public_key = $1 WHERE id = $2`,
+		req.IdentityPublicKey, userID,
+	); err != nil {
+		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 type SignedPreKeyRequest struct {

@@ -90,6 +90,19 @@ class ApiClient {
     _handleResponse(response);
   }
 
+  /// 同步本地 identity 公钥到服务器。
+  /// ★关键：登录/重装后本地可能生成了新 identity，而服务器还是旧值 → 对端取
+  ///   bundle 拿到旧 IK、本机用新 IK → X3DH DH2 不对称 → 解密 MAC 失败。
+  ///   每次 publishPrekeyBundle 时调用，保证服务器 identity 与本地一致。
+  Future<void> updateIdentity({required String identityPublicKey}) async {
+    final response = await _client.put(
+      Uri.parse('$_baseUrl/keys/identity'),
+      headers: await _authHeaders(),
+      body: jsonEncode({'identity_public_key': identityPublicKey}),
+    );
+    _handleResponse(response);
+  }
+
   /// 取目标用户的完整 prekey 束（identity + signed-prekey + 一次性 prekey）。
   Future<Map<String, dynamic>> fetchKeyBundle(String userId) async {
     final response = await _client.get(

@@ -229,6 +229,12 @@ func (c *Client) readPump() {
 
 		log.Printf("[SIGNAL] recv type=%v call=%v from=%v to=%v", typ, callID, fromUserID, toUserID)
 
+		// 客户端诊断上报：完整打印 payload，不转发（只用于定位"消息收到但不显示"）。
+		if ts, ok := typ.(string); ok && ts == "chatDiag" {
+			log.Printf("[CHAT-DIAG] %s", message)
+			continue
+		}
+
 		if toID, ok := toUserID.(string); ok && toID != "" {
 			// 聊天消息：目标离线时进 Redis 短期队列，目标在线则按通话路径直转。
 			if s, ok := typ.(string); ok && s == "chatMessage" {

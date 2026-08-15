@@ -188,6 +188,7 @@ class ServiceBridgeSignalingClient extends SignalingClient {
           debugPrint('[SERVICE-BRIDGE] recv ${json['type']} callId=${json['call_id']} from=${json['from_user_id']}');
           final typ = json['type'] as String?;
           if (typ != null && ChatSignal.typeNames.contains(typ)) {
+            debugPrint('[SERVICE-BRIDGE] routing chat signal type=$typ to chatController');
             _chatController.add(ChatSignal.fromJson(json));
             return;
           }

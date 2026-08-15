@@ -1,7 +1,7 @@
 name: myphone
 description: Encrypted calling app with low-bandwidth support.
 publish_to: 'none'
-version: 1.1.1+19
+version: 1.1.1+32
 
 environment:
   sdk: '>=3.2.0 <4.0.0'

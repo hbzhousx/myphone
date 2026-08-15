@@ -12,6 +12,7 @@ enum ChatSignalType {
   chatFileAnswer,
   chatFileIce,
   chatFileDone,
+  chatDiag,
 }
 
 class ChatSignal {

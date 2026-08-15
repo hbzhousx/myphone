@@ -127,14 +127,22 @@ class ChatCrypto {
   static const _nonceLength = 12;
   static const _infoPrefix = 'MyPhone-Chat-Msg-v1:';
 
-  /// 会话绑定 AAD（与旧 ChatRatchet.associatedData 一致，防跨会话重放）。
+  /// 会话绑定 AAD（防跨会话重放）。
+  ///
+  /// ★AAD 必须**加解密两端完全一致**，否则 AES-GCM 认证失败（MAC 错误）。
+  ///   但 sender/recipient 是各端视角（会互换），conversationId 是
+  ///   `conv-<对端id>`（也互换）——若直接用，发送方 AAD=...:conv-A、接收方
+  ///   AAD=...:conv-B，两端 AAD 不同 → 每条消息解密失败、两端都看不到。
+  ///   修复：对双方 user id 排序得到规范形式（唯一标识这对用户的会话，
+  ///   天然防跨会话重放），不再依赖不对称的 conversationId。
   static Uint8List associatedData({
     required String senderUserId,
     required String recipientUserId,
     required String conversationId,
   }) {
+    final ids = [senderUserId, recipientUserId]..sort();
     return Uint8List.fromList(
-      'MyPhone-Chat-v1:$senderUserId:$recipientUserId:$conversationId'.codeUnits,
+      'MyPhone-Chat-v1:${ids[0]}:${ids[1]}'.codeUnits,
     );
   }
 

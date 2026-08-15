@@ -9,11 +9,26 @@ import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:convert/convert.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../network/api_client.dart';
 import '../storage/database.dart';
 import 'chat_crypto.dart';
 import 'crypto_manager.dart';
+
+/// establishAsResponder 的返回：会话 + 诊断用本地 SPK 公钥指纹。
+class ResponderSession {
+  final ChatCryptoSession session;
+  final String spkFingerprint;
+
+  /// 本地 IK 公钥指纹（对比发送方 bundle 的 their_ik_fp）。
+  final String myIkFingerprint;
+  const ResponderSession({
+    required this.session,
+    required this.spkFingerprint,
+    this.myIkFingerprint = '',
+  });
+}
 
 class ChatSessionManager {
   static const _identityKeyType = 'e2ee_identity_x25519';
@@ -73,6 +88,17 @@ class ChatSessionManager {
   /// ★SPK 必须复用：若本地已有则沿用，避免每次登录重新生成导致「发起方 bundle 的
   ///    SPK 公钥」与「响应方本地 SPK 私钥」不同步 → X3DH 不匹配 → 首条消息解密失败。
   Future<void> publishPrekeyBundle() async {
+    // ★同步本地 identity 到服务器：登录/重装后本地可能生成了新 identity，而服务器
+    //   还是旧值（登录路径不上传 identity）→ 对端取 bundle 拿旧 IK、本机用新 IK
+    //   → X3DH DH2 不对称 → 每条消息解密 MAC 失败。每次启动都同步，保证一致。
+    try {
+      final identity = await loadOrCreateIdentityKey();
+      final idPub = await identity.extractPublicKey();
+      await _api.updateIdentity(identityPublicKey: hex.encode(idPub.bytes));
+    } catch (e) {
+      debugPrint('[SESSION] updateIdentity failed (non-fatal): $e');
+    }
+
     final signingKey = await loadOrCreateSigningKey();
 
     // 签名预密钥：优先复用本地已有（含私钥），仅首次生成。
@@ -122,24 +148,23 @@ class ChatSessionManager {
       signature: hex.encode(signature),
     );
 
-    // 一次性预密钥（不足即补传，幂等）。
-    final countRow = await _db.getKey('${_identityKeyType}_prekey_count');
-    final have = countRow != null ? countRow.first : 0;
-    if (have < _minPrekeysBeforeTopup) {
-      final batch = await CryptoManager.generatePreKeys(_prekeyBatchSize);
-      final preKeys = <Map<String, dynamic>>[];
-      final baseTs = DateTime.now().millisecondsSinceEpoch & 0x7fffffff;
-      for (var i = 0; i < batch.length; i++) {
-        final pub = await batch[i].extractPublicKey();
-        final id = baseTs + i;
-        final exported = await CryptoManager.exportKeyPair(batch[i]);
-        await _db.storeKey('chat_otp_${id}_private', exported.privateKey);
-        await _db.storeKey('chat_otp_${id}_public', exported.publicKey);
-        preKeys.add({'key_id': id, 'public_key': hex.encode(pub.bytes)});
-      }
-      await _api.uploadPreKeys(preKeys);
-      await _db.storeKey('${_identityKeyType}_prekey_count', [_prekeyBatchSize]);
+    // 一次性预密钥：每次启动都重新生成一批并上传（服务器端先清旧再插）。
+    // ★不能只在数量不足时补——否则服务器残留旧批次/孤儿 OTP（key_id 与当前批次
+    //   不同），发起方 GetKeyBundle 取到孤儿公钥、响应方本地无对应私钥 → X3DH 失配
+    //   → 解密失败/灰块。每次重传保证服务器永远只有当前批次（响应方必有私钥）。
+    final batch = await CryptoManager.generatePreKeys(_prekeyBatchSize);
+    final preKeys = <Map<String, dynamic>>[];
+    final baseTs = DateTime.now().millisecondsSinceEpoch & 0x7fffffff;
+    for (var i = 0; i < batch.length; i++) {
+      final pub = await batch[i].extractPublicKey();
+      final id = baseTs + i;
+      final exported = await CryptoManager.exportKeyPair(batch[i]);
+      await _db.storeKey('chat_otp_${id}_private', exported.privateKey);
+      await _db.storeKey('chat_otp_${id}_public', exported.publicKey);
+      preKeys.add({'key_id': id, 'public_key': hex.encode(pub.bytes)});
     }
+    await _api.uploadPreKeys(preKeys);
+    await _db.storeKey('${_identityKeyType}_prekey_count', [_prekeyBatchSize]);
   }
 
   // ---- 发起方 X3DH ----
@@ -208,13 +233,22 @@ class ChatSessionManager {
       'ephemeral_public_key': hex.encode(ourEphPub.bytes),
       'signed_prekey_id': spkKeyId,
       'one_time_prekey_id': otpKeyId,
+      // 诊断：从 bundle 拿到的对端 SPK/OTP/identity 公钥指纹（对比响应方本地是否配对）。
+      'their_spk_fp': hex.encode(spkPub.bytes).substring(0, 16),
+      'their_otp_fp': otp != null
+          ? hex.encode(CryptoManager.keyFromHex(otp['public_key'] as String).bytes)
+              .substring(0, 16)
+          : 'none',
+      'their_ik_fp': hex.encode(theirIdentityPub.bytes).substring(0, 16),
+      'my_ik_fp': hex.encode(ourIdentityPub.bytes).substring(0, 16),
+      'my_ek_fp': hex.encode(ourEphPub.bytes).substring(0, 16),
     };
   }
 
   // ---- 响应方 X3DH ----
 
   /// 响应方建立会话（收到对端首个 chatMessage/chatInit 时调用）。
-  Future<ChatCryptoSession> establishAsResponder({
+  Future<ResponderSession> establishAsResponder({
     required String remoteUserId,
     required String conversationId,
     required Map<String, dynamic> initPayload,
@@ -231,6 +265,15 @@ class ChatSessionManager {
     final spkPair = await _loadOurSignedPrekey();
     final otpId = initPayload['one_time_prekey_id'] as int?;
     final otpPair = otpId != null ? await _loadOurOneTimePrekey(otpId) : null;
+
+    // ★关键：发起方若用了 OTP（initPayload 带 one_time_prekey_id）做 DH4，而响应方
+    //   找不到对应 OTP 私钥时，绝不能静默跳过 DH4 —— 那样两端 X3DH 不对称（发起方
+    //   算了 DH4、响应方没算）→ root key 不同 → 每条消息 AES-GCM MAC 失败。
+    //   必须抛错，让上层知道"无法建立匹配会话"，发送方可重试/重新协商。
+    if (otpId != null && otpPair == null) {
+      throw ChatCryptoException(
+          'responder missing OTP private key for key_id=$otpId (session mismatch)');
+    }
 
     final secrets = <List<int>>[
       await _dh(spkPair, theirIdentityPub), // DH1 = DH(SPKb, IKa)
@@ -249,7 +292,14 @@ class ChatSessionManager {
       remoteIdentityPub: theirIdentityPub.bytes,
     );
     await _saveSession(conversationId, session, remoteUserId);
-    return session;
+    // 诊断：附带本地 SPK + IK 公钥指纹，供 controller 上报对比发起方 bundle。
+    final spkPubBytes = await spkPair.extractPublicKey();
+    final myIkPubBytes = await ourIdentity.extractPublicKey();
+    return ResponderSession(
+      session: session,
+      spkFingerprint: hex.encode(spkPubBytes.bytes).substring(0, 16),
+      myIkFingerprint: hex.encode(myIkPubBytes.bytes).substring(0, 16),
+    );
   }
 
   // ---- 会话持久化 ----
@@ -309,7 +359,12 @@ class ChatSessionManager {
     }
     final storedFingerprint = String.fromCharCodes(stored);
     if (storedFingerprint != fingerprint) {
-      throw ChatCryptoException('remote identity changed — fingerprint mismatch');
+      // ★修复：对端 identity 变化（重装/重新注册后新 identity）时，TOFU 重新信任
+      //   并更新缓存，而不是抛错。否则新 identity 上传后，对端缓存旧指纹，首次
+      //   会话建立直接失败 → 消息永远发不出（报 fingerprint mismatch）。
+      //   X3DH 本身是初次协商，第一次建立会话时更新缓存是安全的。
+      debugPrint('[SESSION] remote identity changed, re-trusting new fingerprint for $remoteUserId');
+      await _db.storeKey('$_remoteIdentityPrefix$remoteUserId', fingerprint.codeUnits);
     }
   }
 

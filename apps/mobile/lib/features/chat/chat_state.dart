@@ -3,6 +3,7 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/auth_guard.dart';
@@ -59,8 +60,9 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
     }
     try {
       await _sessions.publishPrekeyBundle();
-    } catch (_) {
-      // 发布失败（未登录/网络）不阻塞聊天，会话建立时会重试。
+    } catch (e) {
+      // 发布失败（未登录/网络）不阻塞聊天，会话建立时会重试。打日志便于定位。
+      debugPrint('[CHAT-STATE] publishPrekeyBundle failed: $e');
     }
     try {
       await _signaling.connect();
@@ -105,6 +107,7 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
   }
 
   Future<void> _onChatSignal(ChatSignal signal) async {
+    debugPrint('[CHAT-STATE] onChatSignal type=${signal.type.name} from=${signal.fromUserId} to=${signal.toUserId}');
     switch (signal.type) {
       case ChatSignalType.chatMessage:
       case ChatSignalType.chatInit:
@@ -115,6 +118,9 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
         break;
       case ChatSignalType.chatDisappearing:
         await _routeToConversation(signal);
+        break;
+      case ChatSignalType.chatDiag:
+        // 诊断上报，无需在接收方处理（服务器已打印）。
         break;
       case ChatSignalType.chatTyping:
         break;

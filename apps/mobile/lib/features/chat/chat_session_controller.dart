@@ -6,6 +6,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:path_provider/path_provider.dart';
 
 import '../../core/crypto/chat_crypto.dart';
@@ -25,6 +26,10 @@ class ChatSessionController {
   final String _conversationId;
 
   ChatFileTransferManager? _fileManager;
+
+  /// 缓存本次会话的 init_payload（发起方 X3DH 输入），后续每条消息都带上，
+  /// 接收方解密失败时可据此强制重建会话（Signal PreKeySignalMessage 语义）。
+  Map<String, dynamic>? _initPayload;
 
   ChatSessionController({
     required DatabaseManager db,
@@ -58,20 +63,25 @@ class ChatSessionController {
     String body, {
     int expiresInSeconds = 0,
   }) async {
+    debugPrint('[SEND] sendText begin body=$body expires=$expiresInSeconds');
     await _ensureConversation();
-    var session = await _sessions.loadSession(_conversationId);
+    // ★每次发送都重新 X3DH 协商（Signal PreKeySignalMessage 语义）：
+    //   重新取对端 bundle（当前 SPK/OTP 公钥）+ 新 ephemeral → 新会话 + 新
+    //   init_payload。这样接收方每次都能用它重建到**匹配当前 SPK** 的会话。
+    //   若复用旧会话，对端 SPK 变更后两端 key 不配对 → 解密 MAC 失败。
+    var session;
     Map<String, dynamic>? initPayload;
-    if (session == null) {
-      try {
-        initPayload = await _sessions.establishAsInitiator(
-          remoteUserId: _remoteUserId,
-          conversationId: _conversationId,
-        );
-        // 建立会话后重新加载（establishAsInitiator 持久化了新会话）。
-        session = await _sessions.loadSession(_conversationId);
-      } catch (e) {
-        return {'error': 'no session: $e'};
-      }
+    try {
+      initPayload = await _sessions.establishAsInitiator(
+        remoteUserId: _remoteUserId,
+        conversationId: _conversationId,
+      );
+      // establishAsInitiator 已持久化新会话，重新加载。
+      session = await _sessions.loadSession(_conversationId);
+      if (session == null) return {'error': 'session unavailable'};
+    } catch (e) {
+      debugPrint('[SEND] establishAsInitiator failed: $e');
+      return {'error': 'no session: $e'};
     }
 
     final isEmoji = _isPureEmoji(body);
@@ -92,6 +102,16 @@ class ChatSessionController {
       aad: aad,
     );
     await _sessions.saveSession(_conversationId, enc.session);
+    _reportDiag('send:key-fp', {
+      'msg': messageId,
+      'fp': _fp(session.sessionKey),
+      'counter': enc.counter,
+      'their_spk': initPayload?['their_spk_fp'],
+      'their_otp': initPayload?['their_otp_fp'],
+      'their_ik': initPayload?['their_ik_fp'],
+      'my_ik': initPayload?['my_ik_fp'],
+      'my_ek': initPayload?['my_ek_fp'],
+    });
 
     final payload = <String, dynamic>{
       'message_id': messageId,
@@ -102,6 +122,7 @@ class ChatSessionController {
     };
     // Signal 模式：先把本地消息行插入（SENDING 状态），保证气泡总是出现，
     // 再异步发送 WS。即使网络/加密失败，本地也能看到消息（标 failed）。
+    debugPrint('[SEND] inserting local row id=$messageId');
     await _db.insertMessage({
       'id': messageId,
       'conversation_id': _conversationId,
@@ -115,6 +136,7 @@ class ChatSessionController {
           : null,
       'sent_at': DateTime.now().millisecondsSinceEpoch,
     });
+    debugPrint('[SEND] local row inserted, touch conversation');
     await _touchConversation(body, messageId);
 
     try {
@@ -125,13 +147,18 @@ class ChatSessionController {
         messageId: messageId,
         payload: payload,
       );
+      debugPrint('[SEND] sending over WS to=$_remoteUserId');
       final sent = await _signaling.sendChatSignal(sig);
+      debugPrint('[SEND] WS send result=$sent');
+      _reportDiag('send:ws-result', {'msg': messageId, 'sent': sent});
       // 发送成功 → 更新状态 sent；WS 未连接 → 标记 failed，用户可见。
       await _db.updateMessageStatus(messageId, sent ? 'sent' : 'failed');
       if (!sent) {
         return {'error': 'WS 未连接，消息未发出'};
       }
     } catch (e) {
+      debugPrint('[SEND] WS send threw: $e');
+      _reportDiag('send:ws-threw', {'msg': messageId, 'err': '$e'});
       await _db.updateMessageStatus(messageId, 'failed');
       return {'error': 'send failed: $e'};
     }
@@ -141,29 +168,48 @@ class ChatSessionController {
 
   /// 处理入站 chatMessage（解密、入库、回执、阅后即焚）。
   Future<void> handleIncoming(ChatSignal signal) async {
+    debugPrint('[RECV] handleIncoming type=${signal.type} from=${signal.fromUserId}');
+    _reportDiag('incoming:begin', {'from': signal.fromUserId});
     await _ensureConversation();
     final payload = signal.payload ?? const {};
     final messageId =
         payload['message_id'] as String? ?? signal.messageId ?? _newId();
+    debugPrint('[RECV] messageId=$messageId');
 
     // 已有记录（离线队列重投/回执重放）→ 忽略。
-    if (await _db.getMessage(messageId) != null) return;
+    if (await _db.getMessage(messageId) != null) {
+      debugPrint('[RECV] already have message, ignore');
+      _reportDiag('incoming:dup-ignore', {'msg': messageId});
+      return;
+    }
 
     final ciphertextB64 = payload['ciphertext'] as String?;
     final counter = (payload['counter'] as num?)?.toInt();
-    if (ciphertextB64 == null || counter == null) return;
+    if (ciphertextB64 == null || counter == null) {
+      debugPrint('[RECV] no ciphertext/counter, ignore');
+      _reportDiag('incoming:no-cipher', {'msg': messageId});
+      return;
+    }
 
     var session = await _sessions.loadSession(_conversationId);
     if (session == null) {
+      debugPrint('[RECV] no session, establishing as responder');
+      _reportDiag('incoming:no-session', {'msg': messageId});
       try {
-        session = await _sessions.establishAsResponder(
+        final resp = await _sessions.establishAsResponder(
           remoteUserId: _remoteUserId,
           conversationId: _conversationId,
           initPayload:
               (payload['init_payload'] as Map<String, dynamic>?) ?? const {},
         );
+        session = resp.session;
+        _reportDiag('incoming:session-established',
+            {'msg': messageId, 'my_spk': resp.spkFingerprint,
+             'my_ik': resp.myIkFingerprint});
       } catch (e) {
         // 无法建立会话（身份变更等）——丢弃并标记 failed。
+        debugPrint('[RECV] establishAsResponder failed: $e');
+        _reportDiag('incoming:session-failed', {'msg': messageId, 'err': '$e'});
         await _db.insertMessage({
           'id': messageId,
           'conversation_id': _conversationId,
@@ -182,7 +228,7 @@ class ChatSessionController {
       recipientUserId: _localUserId,
       conversationId: _conversationId,
     );
-    final ChatCryptoDecryptResult dec;
+    ChatCryptoDecryptResult dec;
     try {
       dec = await ChatCrypto.decryptMessage(
         session,
@@ -191,18 +237,64 @@ class ChatSessionController {
         counter: counter,
         aad: aad,
       );
+      _reportDiag('incoming:decrypted',
+          {'msg': messageId, 'counter': counter, 'fp': _fp(session.sessionKey)});
     } catch (e) {
-      // 解密失败（篡改/重放）——记录 failed，不回卷链。
-      await _db.insertMessage({
-        'id': messageId,
-        'conversation_id': _conversationId,
-        'direction': 'incoming',
-        'kind': 'text',
-        'body': null,
-        'status': 'failed',
-        'created_at': DateTime.now().millisecondsSinceEpoch,
-      });
-      return;
+      // 解密失败。可能是旧会话残留/两端会话不同步。若消息带 init_payload，
+      // 强制重建会话（Signal PreKeySignalMessage 语义）再重试一次。
+      final initPayload = payload['init_payload'] as Map<String, dynamic>?;
+      if (initPayload != null && initPayload.isNotEmpty) {
+        debugPrint('[RECV] decrypt failed with old session, forcing re-establish with init_payload');
+        _reportDiag('incoming:re-establish', {'msg': messageId});
+        try {
+          final resp = await _sessions.establishAsResponder(
+            remoteUserId: _remoteUserId,
+            conversationId: _conversationId,
+            initPayload: initPayload,
+          );
+          session = resp.session;
+          _reportDiag('incoming:re-established',
+              {'msg': messageId, 'my_spk': resp.spkFingerprint,
+               'my_ik': resp.myIkFingerprint});
+          dec = await ChatCrypto.decryptMessage(
+            session,
+            base64Decode(ciphertextB64),
+            messageId: messageId,
+            counter: counter,
+            aad: aad,
+          );
+          _reportDiag('incoming:decrypted-after-reestablish', {'msg': messageId});
+        } catch (e2) {
+          debugPrint('[RECV] re-establish+decrypt failed: $e2');
+          _reportDiag('incoming:reestablish-failed',
+              {'msg': messageId, 'err': '$e2',
+               'fp': session != null ? _fp(session.sessionKey) : 'null'});
+          await _db.insertMessage({
+            'id': messageId,
+            'conversation_id': _conversationId,
+            'direction': 'incoming',
+            'kind': 'text',
+            'body': null,
+            'status': 'failed',
+            'created_at': DateTime.now().millisecondsSinceEpoch,
+          });
+          return;
+        }
+      } else {
+        // 无 init_payload 且旧会话解不了——记录 failed，不回卷链。
+        debugPrint('[RECV] decrypt failed (no init_payload): $e');
+        _reportDiag('incoming:decrypt-failed', {'msg': messageId, 'err': '$e'});
+        await _db.insertMessage({
+          'id': messageId,
+          'conversation_id': _conversationId,
+          'direction': 'incoming',
+          'kind': 'text',
+          'body': null,
+          'status': 'failed',
+          'created_at': DateTime.now().millisecondsSinceEpoch,
+        });
+        return;
+      }
     }
     await _sessions.saveSession(_conversationId, dec.session);
 
@@ -210,6 +302,9 @@ class ChatSessionController {
     final kind = parsed['kind'] as String? ?? 'text';
     final body = parsed['body'] as String? ?? '';
     final expiresIn = (payload['expires_in_seconds'] as num?)?.toInt() ?? 0;
+    debugPrint('[RECV] decrypted kind=$kind body=$body isFile=${parsed.containsKey('transfer_id')}');
+    _reportDiag('incoming:decrypted-body',
+        {'msg': messageId, 'kind': kind, 'bodyLen': body.length, 'body': body.substring(0, body.length > 30 ? 30 : body.length)});
 
     // 附件元数据消息（含 transfer_id）：落附件表，等数据通道到达。
     final isFile = parsed.containsKey('transfer_id');
@@ -226,6 +321,8 @@ class ChatSessionController {
       'received_at': now,
       'created_at': now,
     });
+    debugPrint('[RECV] incoming row inserted');
+    _reportDiag('incoming:inserted', {'msg': messageId, 'kind': kind});
 
     if (isFile) {
       // 附件元数据：存 per-file AES key + 明文落盘路径，供 chatFileOffer 使用。
@@ -303,6 +400,7 @@ class ChatSessionController {
   }
 
   void _sendReceipt(String messageId, String kind) {
+    debugPrint('[RECV] sending receipt kind=$kind msgId=$messageId');
     _signaling.sendChatSignal(ChatSignal(
       type: ChatSignalType.chatReceipt,
       fromUserId: _localUserId,
@@ -310,6 +408,25 @@ class ChatSessionController {
       messageId: messageId,
       payload: {'message_id': messageId, 'kind': kind},
     ));
+  }
+
+  /// 诊断上报：把接收处理的进度通过 chatDiag 发到服务器日志（服务器不转发）。
+  /// 用于定位"消息收到但不显示"——每步调用，服务器 [CHAT-DIAG] 能看走到哪。
+  void _reportDiag(String step, Map<String, dynamic> data) {
+    try {
+      _signaling.sendChatSignal(ChatSignal(
+        type: ChatSignalType.chatDiag,
+        fromUserId: _localUserId,
+        toUserId: _remoteUserId,
+        payload: {'step': step, 'conv': _conversationId, ...data},
+      ));
+    } catch (_) {}
+  }
+
+  /// sessionKey 指纹（前 8 字节 hex）——两端对比是否一致，定位 X3DH 失配。
+  String _fp(List<int> key) {
+    final n = key.length < 8 ? key.length : 8;
+    return key.sublist(0, n).map((e) => e.toRadixString(16).padLeft(2, '0')).join();
   }
 
   /// 确保 conversation 行存在（messages.conversation_id 有外键约束，
@@ -328,11 +445,16 @@ class ChatSessionController {
 
   Future<void> _touchConversation(String preview, String lastMessageId) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    // 保留已有 display_name：upsert 用 replace 会覆盖整行，若这里不带会清空名字。
+    // 保留已有 display_name / disappearing_seconds：upsert 用 replace 会覆盖
+    // 整行，若这里不带会清空名字、并把阅后即焚设置静默重置为 0
+    // （导致用户设的阅后即焚在发/收一条消息后莫名消失）。
     String? displayName;
+    int? disappearingSeconds;
     try {
       final existing = await _db.getConversation(_conversationId);
       displayName = existing?['remote_display_name'] as String?;
+      disappearingSeconds =
+          (existing?['disappearing_seconds'] as num?)?.toInt();
       if ((displayName == null || displayName.isEmpty) &&
           _remoteUserId.isNotEmpty) {
         final contact = await _db.getContact(_remoteUserId);
@@ -345,6 +467,8 @@ class ChatSessionController {
       'id': _conversationId,
       'remote_user_id': _remoteUserId,
       'remote_display_name': displayName,
+      if (disappearingSeconds != null)
+        'disappearing_seconds': disappearingSeconds,
       'last_message_at': now,
       'last_message_preview':
           preview.length > 60 ? preview.substring(0, 60) : preview,
@@ -381,18 +505,18 @@ class ChatSessionController {
     final src = File(filePath);
     if (!await src.exists()) return {'error': 'file not found'};
 
-    var session = await _sessions.loadSession(_conversationId);
+    // ★每次发送都重新 X3DH 协商（同 sendText）：确保用对端当前 SPK/OTP 配对。
+    var session;
     Map<String, dynamic>? initPayload;
-    if (session == null) {
-      try {
-        initPayload = await _sessions.establishAsInitiator(
-          remoteUserId: _remoteUserId,
-          conversationId: _conversationId,
-        );
-        session = await _sessions.loadSession(_conversationId);
-      } catch (e) {
-        return {'error': 'no session: $e'};
-      }
+    try {
+      initPayload = await _sessions.establishAsInitiator(
+        remoteUserId: _remoteUserId,
+        conversationId: _conversationId,
+      );
+      session = await _sessions.loadSession(_conversationId);
+      if (session == null) return {'error': 'session unavailable'};
+    } catch (e) {
+      return {'error': 'no session: $e'};
     }
 
     final messageId = _newId();
