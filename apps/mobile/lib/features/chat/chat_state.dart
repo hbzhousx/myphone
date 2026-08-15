@@ -80,15 +80,8 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
     _expiryTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
       final n = await _db.deleteExpiredMessages();
       if (n > 0) {
-        // 诊断：阅后即焚删除发生时上报（定位"消息莫名消失"）。
-        try {
-          _signaling.sendChatSignal(ChatSignal(
-            type: ChatSignalType.chatDiag,
-            fromUserId: _localUserId ?? '',
-            toUserId: _localUserId ?? '',
-            payload: {'step': 'expiry:deleted', 'count': n},
-          ));
-        } catch (_) {}
+        // 诊断：阅后即焚删除发生时上报（定位"消息莫名消失"）。走 _diag 统一开关。
+        _diag('expiry:deleted', {'count': n});
       }
     });
     _db.deleteExpiredMessages();
@@ -110,6 +103,7 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
 
   /// 诊断上报（fire-and-forget，不阻塞 _init）。
   void _diag(String step, Map<String, dynamic> data) {
+    if (!kChatDiag) return;
     try {
       _signaling.sendChatSignal(ChatSignal(
         type: ChatSignalType.chatDiag,

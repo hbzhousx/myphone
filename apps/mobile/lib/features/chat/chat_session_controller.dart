@@ -17,6 +17,11 @@ import '../../core/network/signaling_client.dart';
 import '../../core/storage/database.dart';
 import 'chat_file_transfer_manager.dart';
 
+/// chatDiag 统一开关（服务器 [CHAT-DIAG] 日志）。默认 ON 便于真机排查，
+/// 调试完成后翻转为 false 可静默全部诊断上报（发送/接收/文件/ui）。
+/// 一处控制，server 端 hub.go 无需改动。
+const bool kChatDiag = true;
+
 class ChatSessionController {
   final DatabaseManager _db;
   final ChatSessionManager _sessions;
@@ -423,6 +428,7 @@ class ChatSessionController {
   }
 
   void _reportDiag(String step, Map<String, dynamic> data) {
+    if (!kChatDiag) return;
     try {
       _signaling.sendChatSignal(ChatSignal(
         type: ChatSignalType.chatDiag,

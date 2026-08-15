@@ -15,6 +15,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/permission/permission_service.dart';
 import '../../../core/storage/database.dart';
+import '../chat_message_repository.dart';
+import '../chat_session_controller.dart' show kChatDiag;
 import '../chat_state.dart';
 import '../widgets/message_bubble.dart';
 
@@ -46,6 +48,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   String _displayName = '';
   int _disappearSeconds = 0;
   Timer? _pollTimer;
+
+  /// 会话消息仓库（懒建）：数据访问 + 附件路径补全 + 诊断上报。
+  ChatMessageRepository? _loader;
 
   String get _conversationId => 'conv-${widget.contactId}';
 
@@ -86,100 +91,38 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (mounted) setState(() => _displayName = name);
   }
 
+  /// 懒建会话消息仓库：首次调用等 controllerFor（内部等 chat ready）后构造，
+  /// 之后轮询直接复用。数据查询/附件补全/诊断都收敛到仓库，widget 只编排。
+  Future<ChatMessageRepository> _ensureLoader() async {
+    if (_loader != null) return _loader!;
+    final controller = await ref.read(chatStateProvider.notifier).controllerFor(
+          remoteUserId: widget.contactId,
+          conversationId: _conversationId,
+        );
+    _loader = ChatMessageRepository(
+      db: DatabaseManager.instance,
+      conversationId: _conversationId,
+      onDiag: kChatDiag ? controller.reportDiagnostic : null,
+    );
+    return _loader!;
+  }
+
   Future<void> _loadMessages() async {
     try {
-      final rows = await DatabaseManager.instance
-          .getMessages(_conversationId, limit: 200);
-      // 诊断：getMessages 后立即上报（fire-and-forget，不阻塞），确认 mounted 状态。
-      try {
-        ref
-            .read(chatStateProvider.notifier)
-            .controllerFor(
-              remoteUserId: widget.contactId,
-              conversationId: _conversationId,
-            )
-            .then((c) => c.reportDiagnostic('ui:fetch',
-                {'conv': _conversationId, 'mounted': mounted, 'rows': rows.length,
-                 'tidTypes': rows.map((m) {
-                    final t = m['transfer_id'];
-                    return t == null ? 'null' : (t is String ? 'str' : t.runtimeType.toString());
-                  }).toList().join(',')}))
-            .catchError((_) {});
-      } catch (_) {}
+      final rows = await _ensureLoader().then((l) => l.load());
       if (!mounted) return;
-      // 为附件消息补本地明文路径（供图片缩略图/文件卡片展示）。
-      // ★getAttachment 必须容错：任一条附件查询异常都不能卡死整个刷新
-      //   （否则 withPaths 构建中断 → setState 不执行 → 消息全不显示、白屏）。
-      final withPaths = <Map<String, dynamic>>[];
-      for (final row in rows) {
-        // ★必须拷贝为可写 map：sqflite 返回的 QueryRow 是只读的，
-        //   直接 `msg['_attachment_path'] = ...` 会抛
-        //   `Unsupported operation: read-only` → 中断循环 → setState 不执行 → 白屏。
-        final msg = Map<String, dynamic>.from(row);
-        // ★transfer_id 类型安全：DB 里可能是 int/其他，直接 as String? 会抛
-        //   _TypeError 中断整个循环 → setState 不执行 → 白屏。安全转换。
-        final transferIdRaw = msg['transfer_id'];
-        final transferId =
-            transferIdRaw is String ? transferIdRaw : null;
-        if (transferId != null) {
-          try {
-            final attach =
-                await DatabaseManager.instance.getAttachment(transferId);
-            msg['_attachment_path'] =
-                attach?['local_plain_path'] as String?;
-            // 诊断：附件消息的 local_plain_path + 文件是否存在（定位图片无法预览）。
-            final p = attach?['local_plain_path'] as String?;
-            if (p != null) {
-              try {
-                ref
-                    .read(chatStateProvider.notifier)
-                    .controllerFor(
-                      remoteUserId: widget.contactId,
-                      conversationId: _conversationId,
-                    )
-                    .then((c) => c.reportDiagnostic('ui:attach',
-                        {'msg': msg['id'], 'tid': transferId, 'path': p,
-                         'exists': File(p).existsSync()}))
-                    .catchError((_) {});
-              } catch (_) {}
-            }
-          } catch (e) {
-            msg['_attachment_path'] = null;
-          }
-        }
-        withPaths.add(msg);
-      }
       setState(() {
-        _messages = withPaths;
+        _messages = rows;
         _loading = false;
       });
-      // 诊断：setState 后 fire-and-forget 上报（不 await controllerFor，避免阻塞）。
-      try {
-        ref
-            .read(chatStateProvider.notifier)
-            .controllerFor(
-              remoteUserId: widget.contactId,
-              conversationId: _conversationId,
-            )
-            .then((c) => c.reportDiagnostic('ui:setState',
-                {'conv': _conversationId, 'n': withPaths.length}))
-            .catchError((_) {});
-      } catch (_) {}
       _maybeReadIncoming(rows);
       _syncDisappearSetting();
     } catch (e, st) {
       debugPrint('[CHAT] load messages failed: $e');
-      // 诊断：上报 _loadMessages 异常（fire-and-forget）。
+      // 诊断：上报 _loadMessages 异常（fire-and-forget，走仓库 onDiag）。
       try {
-        ref
-            .read(chatStateProvider.notifier)
-            .controllerFor(
-              remoteUserId: widget.contactId,
-              conversationId: _conversationId,
-            )
-            .then((c) => c.reportDiagnostic('ui:loadError',
-                {'conv': _conversationId, 'err': '$e', 'stack': '$st'}))
-            .catchError((_) {});
+        _loader?.onDiag?.call('ui:loadError',
+            {'conv': _conversationId, 'err': '$e', 'stack': '$st'});
       } catch (_) {}
       if (mounted) setState(() => _loading = false);
     }
@@ -540,18 +483,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    // 诊断：build 时 fire-and-forget 上报 _messages 数量（确认 setState 后是否有值）。
-    try {
-      ref
-          .read(chatStateProvider.notifier)
-          .controllerFor(
-            remoteUserId: widget.contactId,
-            conversationId: _conversationId,
-          )
-          .then((c) => c.reportDiagnostic('ui:build',
-              {'conv': _conversationId, 'msgs': _messages.length, 'loading': _loading}))
-          .catchError((_) {});
-    } catch (_) {}
 
     return Scaffold(
       appBar: AppBar(
