@@ -11,7 +11,7 @@ import 'key_manager.dart';
 
 class DatabaseManager {
   static const _databaseName = 'myphone.db';
-  static const _schemaVersion = 6;
+  static const _schemaVersion = 7;
   static const _plaintextBackupSuffix = '.plaintext-migration';
   static DatabaseManager? _instance;
   sqlcipher.Database? _db;
@@ -117,7 +117,7 @@ class DatabaseManager {
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL REFERENCES conversations(id),
         direction TEXT NOT NULL CHECK(direction IN ('outgoing','incoming')),
-        kind TEXT NOT NULL CHECK(kind IN ('text','emoji','image','video','file')),
+        kind TEXT NOT NULL CHECK(kind IN ('text','emoji','image','video','file','location')),
         body TEXT,
         ciphertext BLOB,
         status TEXT CHECK(status IN ('sending','pending','sent','delivered','read','failed')),
@@ -126,6 +126,8 @@ class DatabaseManager {
         read_at INTEGER,
         sent_at INTEGER, received_at INTEGER,
         transfer_id TEXT,
+        latitude REAL,
+        longitude REAL,
         created_at INTEGER NOT NULL)
     ''');
     await db.execute('''
@@ -195,6 +197,43 @@ class DatabaseManager {
       ''');
       await db.execute('DROP TABLE message_attachments');
       await db.execute('ALTER TABLE message_attachments_v6 RENAME TO message_attachments');
+    }
+    if (oldVersion < 7) {
+      // v7: messages.kind 加 'location' + latitude/longitude 列（位置消息）。
+      //    SQLite 改 CHECK 必须重建表。messages 被 message_attachments 外键引用，
+      //    重建前关外键，重建后恢复。
+      await db.execute('PRAGMA foreign_keys = OFF');
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS messages_v7 (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id),
+          direction TEXT NOT NULL CHECK(direction IN ('outgoing','incoming')),
+          kind TEXT NOT NULL CHECK(kind IN ('text','emoji','image','video','file','location')),
+          body TEXT,
+          ciphertext BLOB,
+          status TEXT CHECK(status IN ('sending','pending','sent','delivered','read','failed')),
+          expires_in_seconds INTEGER DEFAULT 0,
+          expires_at INTEGER,
+          read_at INTEGER,
+          sent_at INTEGER, received_at INTEGER,
+          transfer_id TEXT,
+          latitude REAL,
+          longitude REAL,
+          created_at INTEGER NOT NULL)
+      ''');
+      await db.execute('''
+        INSERT INTO messages_v7
+          (id, conversation_id, direction, kind, body, ciphertext, status,
+           expires_in_seconds, expires_at, read_at, sent_at, received_at,
+           transfer_id, created_at)
+        SELECT id, conversation_id, direction, kind, body, ciphertext, status,
+           expires_in_seconds, expires_at, read_at, sent_at, received_at,
+           transfer_id, created_at
+        FROM messages
+      ''');
+      await db.execute('DROP TABLE messages');
+      await db.execute('ALTER TABLE messages_v7 RENAME TO messages');
+      await db.execute('PRAGMA foreign_keys = ON');
     }
   }
 
@@ -520,6 +559,34 @@ class DatabaseManager {
       }
     }
     return rows.length;
+  }
+
+  /// 删除单条消息（含关联附件行）。手动删除聊天记录用。
+  Future<void> deleteMessage(String id) async {
+    final db = await database;
+    final row = await getMessage(id);
+    final transferId = row?['transfer_id'] as String?;
+    if (transferId != null) {
+      await db.delete('message_attachments',
+          where: 'id = ?', whereArgs: [transferId]);
+    }
+    await db.delete('messages', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// 清空某会话的所有消息（含关联附件行）。"清空聊天记录"用。
+  Future<void> clearConversationMessages(String conversationId) async {
+    final db = await database;
+    final rows = await db.query('messages',
+        where: 'conversation_id = ?', whereArgs: [conversationId]);
+    for (final row in rows) {
+      final transferId = row['transfer_id'] as String?;
+      if (transferId != null) {
+        await db.delete('message_attachments',
+            where: 'id = ?', whereArgs: [transferId]);
+      }
+    }
+    await db.delete('messages',
+        where: 'conversation_id = ?', whereArgs: [conversationId]);
   }
 
   Future<void> close() async {

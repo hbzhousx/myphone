@@ -8,6 +8,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mime/mime.dart';
 import 'package:path/path.dart' as p;
@@ -19,6 +20,7 @@ import '../chat_message_repository.dart';
 import '../chat_session_controller.dart' show kChatDiag;
 import '../chat_state.dart';
 import '../widgets/message_bubble.dart';
+import 'location_picker_screen.dart';
 
 /// 阅后即焚可选项：秒数 → 显示文案。
 /// 最小从 1 小时起（短暂选项会让消息在几秒/几分钟内消失，用户以为消息丢失）。
@@ -39,7 +41,7 @@ class ChatScreen extends ConsumerStatefulWidget {
 }
 
 /// 附件来源。
-enum _AttachSource { gallery, camera, file }
+enum _AttachSource { gallery, camera, file, location }
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _inputController = TextEditingController();
@@ -245,6 +247,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               title: const Text('发送文件'),
               onTap: () => Navigator.pop(ctx, _AttachSource.file),
             ),
+            ListTile(
+              leading: const Icon(Icons.place_outlined),
+              title: const Text('位置'),
+              onTap: () => Navigator.pop(ctx, _AttachSource.location),
+            ),
           ],
         ),
       ),
@@ -258,6 +265,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         await _sendImage(ImageSource.camera);
       case _AttachSource.file:
         await _sendFilePicker();
+      case _AttachSource.location:
+        await _sendLocation();
     }
   }
 
@@ -417,11 +426,125 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  /// 地图选点位置发送：权限 → 打开地图选点页（flutter_map+高德瓦片，接受网格误差）
+  /// → 用户拖动选点 → 发送坐标（GCJ-02，接收端高德/百度 URI 用）。
+  Future<void> _sendLocation() async {
+    try {
+      // 定位权限。
+      final perm = await Geolocator.checkPermission();
+      _diagLoc('ui:loc-perm', {'perm': perm.name});
+      if (perm == LocationPermission.denied) {
+        final granted = await Geolocator.requestPermission();
+        _diagLoc('ui:loc-perm-request', {'granted': granted.name});
+        if (granted == LocationPermission.denied ||
+            granted == LocationPermission.deniedForever) {
+          _showSendError('需要定位权限才能发送位置');
+          return;
+        }
+      }
+      if (!mounted) return;
+      // 打开地图选点页（用户拖动选点；接受高德瓦片网格误差）。
+      final picked = await showLocationPicker(context);
+      _diagLoc('ui:loc-picked', {'picked': picked != null});
+      if (picked == null || !mounted) return;
+      final controller = await ref
+          .read(chatStateProvider.notifier)
+          .controllerFor(
+            remoteUserId: widget.contactId,
+            conversationId: _conversationId,
+          );
+      final result = await controller.sendLocation(
+        latitude: picked.latitude,
+        longitude: picked.longitude,
+        expiresInSeconds: _disappearSeconds,
+      );
+      _diagLoc('ui:loc-sent', {'result': result?.toString() ?? 'null'});
+      if (result != null && result.containsKey('error')) {
+        _showSendError(result['error'].toString());
+      }
+      await _loadMessages();
+    } catch (e) {
+      debugPrint('[CHAT] send location failed: $e');
+      _diagLoc('ui:loc-error', {'err': '$e'});
+      _showSendError('获取位置失败：$e');
+    }
+  }
+
+  /// 位置功能诊断（fire-and-forget 上报服务器）。
+  void _diagLoc(String step, Map<String, dynamic> data) {
+    try {
+      _loader?.onDiag?.call(step, data);
+    } catch (_) {}
+  }
+
   void _showSendError(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('发送失败：$message')),
     );
+  }
+
+  /// AppBar "..." → 清空本会话所有聊天记录（确认后本地清空）。
+  Future<void> _clearAllMessages() async {
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空所有聊天记录？'),
+        content: const Text('将删除本会话的全部消息（仅从本机移除，对方仍可见）。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await DatabaseManager.instance
+          .clearConversationMessages(_conversationId);
+      await _loadMessages();
+    } catch (e) {
+      debugPrint('[CHAT] clear messages failed: $e');
+    }
+  }
+
+  /// 长按消息 → 确认删除单条（本地删除）。
+  Future<void> _deleteMessage(String messageId) async {
+    if (messageId.isEmpty || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除这条消息？'),
+        content: const Text('删除后仅从本机移除，对方仍可见。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      final controller = await ref.read(chatStateProvider.notifier).controllerFor(
+            remoteUserId: widget.contactId,
+            conversationId: _conversationId,
+          );
+      await controller.deleteMessage(messageId);
+      await _loadMessages();
+    } catch (e) {
+      debugPrint('[CHAT] delete message failed: $e');
+    }
   }
 
   /// 打开已接收的文件/图片（本地解密后路径）。
@@ -580,6 +703,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ],
             icon: const Icon(Icons.timer_outlined),
           ),
+          // 更多：清空所有聊天记录。
+          PopupMenuButton<String>(
+            onSelected: (value) async {
+              if (value == 'clear') await _clearAllMessages();
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem<String>(
+                value: 'clear',
+                child: Text('清空所有聊天记录'),
+              ),
+            ],
+            icon: const Icon(Icons.more_horiz),
+          ),
         ],
       ),
       body: Column(
@@ -607,9 +743,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             timestamp: (msg['created_at'] as num?)?.toInt(),
                             transferId: transferId,
                             attachmentPath: msg['_attachment_path'] as String?,
+                            latitude: (msg['latitude'] as num?)?.toDouble(),
+                            longitude: (msg['longitude'] as num?)?.toDouble(),
                             onAttachmentTap: transferId != null
                                 ? () => _openAttachment(transferId)
                                 : null,
+                            onLongPress: () => _deleteMessage(
+                                msg['id'] as String? ?? ''),
                           );
                         },
                       ),

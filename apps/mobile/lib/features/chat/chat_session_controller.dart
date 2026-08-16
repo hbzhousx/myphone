@@ -159,6 +159,93 @@ class ChatSessionController {
     return {'message_id': messageId};
   }
 
+  /// 发送位置消息：X3DH 协商 → 棘轮加密 meta{kind:location, 坐标} → 发信令 → 落库。
+  /// 参考微信简化版：发送坐标 + 地址文本（body），接收方点击调系统地图。
+  Future<Map<String, dynamic>?> sendLocation({
+    required double latitude,
+    required double longitude,
+    int expiresInSeconds = 0,
+  }) async {
+    await _ensureConversation();
+    final body =
+        '位置：$latitude, $longitude'; // 简化：坐标文本（后续可接反向地理编码）。
+    var session;
+    Map<String, dynamic>? initPayload;
+    try {
+      initPayload = await _sessions.establishAsInitiator(
+        remoteUserId: _remoteUserId,
+        conversationId: _conversationId,
+      );
+      session = await _sessions.loadSession(_conversationId);
+      if (session == null) return {'error': 'session unavailable'};
+    } catch (e) {
+      return {'error': 'no session: $e'};
+    }
+
+    final messageId = _newId();
+    final plaintext = utf8.encode(jsonEncode({
+      'kind': 'location',
+      'body': body,
+      'latitude': latitude,
+      'longitude': longitude,
+    }));
+    if (session == null) return {'error': 'session unavailable'};
+
+    final aad = ChatCrypto.associatedData(
+      senderUserId: _localUserId,
+      recipientUserId: _remoteUserId,
+      conversationId: _conversationId,
+    );
+    final enc = await ChatCrypto.encryptMessage(
+      session,
+      plaintext,
+      messageId: messageId,
+      aad: aad,
+    );
+    await _sessions.saveSession(_conversationId, enc.session);
+
+    // Signal 模式：先插本地消息行（含坐标），再发 WS。
+    await _db.insertMessage({
+      'id': messageId,
+      'conversation_id': _conversationId,
+      'direction': 'outgoing',
+      'kind': 'location',
+      'body': body,
+      'status': 'sending',
+      'expires_in_seconds': expiresInSeconds,
+      'expires_at': expiresInSeconds > 0
+          ? DateTime.now().millisecondsSinceEpoch + expiresInSeconds * 1000
+          : null,
+      'latitude': latitude,
+      'longitude': longitude,
+      'sent_at': DateTime.now().millisecondsSinceEpoch,
+    });
+    await _touchConversation(body, messageId);
+
+    try {
+      final sent = await _signaling.sendChatSignal(ChatSignal(
+        type: ChatSignalType.chatMessage,
+        fromUserId: _localUserId,
+        toUserId: _remoteUserId,
+        messageId: messageId,
+        payload: {
+          'message_id': messageId,
+          'ciphertext': base64Encode(enc.ciphertext),
+          'counter': enc.counter,
+          'expires_in_seconds': expiresInSeconds,
+          if (initPayload != null) 'init_payload': initPayload,
+        },
+      ));
+      await _db.updateMessageStatus(messageId, sent ? 'sent' : 'failed');
+      if (!sent) return {'error': 'WS 未连接，消息未发出'};
+    } catch (e) {
+      await _db.updateMessageStatus(messageId, 'failed');
+      return {'error': 'send failed: $e'};
+    }
+
+    return {'message_id': messageId};
+  }
+
   /// 处理入站 chatMessage（解密、入库、回执、阅后即焚）。
   Future<void> handleIncoming(ChatSignal signal) async {
     debugPrint('[RECV] handleIncoming type=${signal.type} from=${signal.fromUserId}');
@@ -317,6 +404,9 @@ class ChatSessionController {
       'received_at': now,
       'created_at': now,
       if (transferId != null) 'transfer_id': transferId,
+      // 位置消息坐标（kind=location）。
+      if (kind == 'location') 'latitude': (parsed['latitude'] as num?)?.toDouble(),
+      if (kind == 'location') 'longitude': (parsed['longitude'] as num?)?.toDouble(),
     });
     debugPrint('[RECV] incoming row inserted');
     _reportDiag('incoming:inserted', {'msg': messageId, 'kind': kind});
@@ -684,6 +774,11 @@ class ChatSessionController {
       // unawaited 调用会吞异常——这里必须兜底上报，否则扫描失败静默。
       _reportDiag('file:http-scan-error', {'err': '$e', 'stack': '$st'});
     }
+  }
+
+  /// 删除单条消息（本地删除，不发信令；对齐 Signal 本地删除语义）。
+  Future<void> deleteMessage(String messageId) async {
+    await _db.deleteMessage(messageId);
   }
 
   /// 标记已读：更新本地 + 发送 read 回执。

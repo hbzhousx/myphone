@@ -5,6 +5,9 @@ library;
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import '../../../shared/utils/bd_coords.dart';
 
 class MessageBubble extends StatelessWidget {
   final String text;
@@ -22,6 +25,13 @@ class MessageBubble extends StatelessWidget {
   /// 附件点击回调（图片/文件预览）。
   final VoidCallback? onAttachmentTap;
 
+  /// 长按回调（手动删除消息用）。
+  final VoidCallback? onLongPress;
+
+  /// 位置消息坐标（kind=location）。
+  final double? latitude;
+  final double? longitude;
+
   const MessageBubble({
     super.key,
     required this.text,
@@ -32,10 +42,69 @@ class MessageBubble extends StatelessWidget {
     this.transferId,
     this.attachmentPath,
     this.onAttachmentTap,
+    this.onLongPress,
+    this.latitude,
+    this.longitude,
   });
 
   bool get _isAttachment =>
-      kind == 'image' || kind == 'video' || kind == 'file';
+      kind == 'image' || kind == 'video' || kind == 'file' || kind == 'location';
+
+  /// 位置消息点击 → 调地图 App 查看（国内地图 App 用 GCJ-02/BD-09，
+  ///   geo: 传 WGS-84 会被误解 → 偏移）。按高德/百度 URI + 显式坐标类型。
+  VoidCallback? get _locationTap {
+    if (kind != 'location' || latitude == null || longitude == null) {
+      return null;
+    }
+    return () => _openOnMap();
+  }
+
+  Future<void> _openOnMap() async {
+    // ★发送端传的是 GCJ-02（高德选点/瓦片坐标系）。接收端直接用：
+    //   高德 → GCJ-02 + dev=0；百度 → GCJ-02→BD-09；geo: 兜底 → GCJ-02→WGS-84。
+    final gcjLat = latitude!;
+    final gcjLng = longitude!;
+
+    // 高德地图（GCJ-02）：dev=0 声明坐标已加密，直接用收到的 GCJ-02。
+    if (await _canLaunch('androidamap://')) {
+      final lat = gcjLat.toStringAsFixed(6);
+      final lng = gcjLng.toStringAsFixed(6);
+      // ★viewMap 显示地图打点（viewReGeo 是反地理编码，可能触发路线/不显示标记）。
+      final uri = Uri.parse(
+          'androidamap://viewMap?sourceApplication=myphone&poiname=位置&lat=$lat&lon=$lng&dev=0');
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      return;
+    }
+
+    // 百度地图（BD-09）：GCJ-02 → BD-09，coord_type 显式声明 bd09ll。
+    if (await _canLaunch('baidumap://')) {
+      final bd = gcj02ToBd09(gcjLng, gcjLat);
+      final lat = bd.$2.toStringAsFixed(6);
+      final lng = bd.$1.toStringAsFixed(6);
+      final uri = Uri.parse(
+          'baidumap://map/marker?location=$lat,$lng&title=位置&coord_type=bd09ll&src=andr.myphone.app');
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+      return;
+    }
+
+    // 兜底：geo:（系统地图/无高德百度时）→ GCJ-02 转 WGS-84。
+    final wgs = gcj02ToWgs84(gcjLng, gcjLat);
+    final lat = wgs.$2.toStringAsFixed(6);
+    final lng = wgs.$1.toStringAsFixed(6);
+    await launchUrl(
+      Uri.parse('geo:$lat,$lng?q=$lat,$lng'),
+      mode: LaunchMode.externalApplication,
+    );
+  }
+
+  /// 检测地图 App 是否安装（能响应其 URI scheme）。
+  Future<bool> _canLaunch(String scheme) async {
+    try {
+      return await canLaunchUrl(Uri.parse(scheme));
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// 与 ChatSessionController._isPureEmoji 保持一致的纯 emoji 判定。
   static final RegExp _emojiPattern = RegExp(
@@ -81,7 +150,41 @@ class MessageBubble extends StatelessWidget {
     final canPreview = path != null && File(path).existsSync();
 
     Widget content;
-    if (kind == 'image' && canPreview) {
+    if (kind == 'location') {
+      // 位置消息卡片：图标 + 地址/坐标，点击调系统地图。
+      content = Container(
+        width: 200,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: isOutgoing
+              ? scheme.primary.withOpacity(0.08)
+              : scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.place, color: scheme.primary, size: 28),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('位置', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 2),
+                  Text(
+                    _displayText.isEmpty ? '查看地图' : _displayText,
+                    style: TextStyle(fontSize: 12, color: textColor),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    } else if (kind == 'image' && canPreview) {
       content = ClipRRect(
         borderRadius: BorderRadius.circular(10),
         child: Image.file(
@@ -114,7 +217,8 @@ class MessageBubble extends StatelessWidget {
     }
 
     return GestureDetector(
-      onTap: onAttachmentTap,
+      onTap: kind == 'location' ? _locationTap : onAttachmentTap,
+      onLongPress: onLongPress,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         mainAxisSize: MainAxisSize.min,
@@ -180,7 +284,9 @@ class MessageBubble extends StatelessWidget {
             isOutgoing ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
+          GestureDetector(
+            onLongPress: onLongPress,
+            child: Container(
             margin: const EdgeInsets.symmetric(vertical: 3),
             padding: isEmoji
                 ? const EdgeInsets.symmetric(horizontal: 12, vertical: 4)
@@ -221,6 +327,7 @@ class MessageBubble extends StatelessWidget {
                       ],
                     ],
                   ),
+            ),
           ),
           if (timestamp != null)
             Padding(
