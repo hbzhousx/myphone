@@ -261,7 +261,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
             ListTile(
               leading: const Icon(Icons.payment_outlined),
-              title: const Text('转账'),
+              title: const Text('收付款'),
               onTap: () => Navigator.pop(ctx, _AttachSource.transfer),
             ),
           ],
@@ -494,12 +494,37 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   /// 转账消息：输入金额 → 确认 → 发 kind='transfer' 消息（不接真实支付）。
   Future<void> _sendTransfer() async {
     if (!mounted) return;
+    // 收付款子菜单：收款 / 支付。
+    final direction = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.qr_code, color: Colors.green),
+              title: const Text('收款'),
+              subtitle: const Text('发收款码带金额，对方点开支付宝付款'),
+              onTap: () => Navigator.pop(ctx, 'receive'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.payment, color: Colors.blue),
+              title: const Text('支付'),
+              subtitle: const Text('发付款请求，对方点开支付宝收款'),
+              onTap: () => Navigator.pop(ctx, 'pay'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (direction == null || !mounted) return;
+
     final amountController = TextEditingController();
     double? amount;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('转账'),
+        title: Text(direction == 'receive' ? '收款' : '支付'),
         content: TextField(
           controller: amountController,
           keyboardType: TextInputType.number,
@@ -535,6 +560,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           );
       final result = await controller.sendTransfer(
         amount: amount!,
+        direction: direction,
         expiresInSeconds: _disappearSeconds,
       );
       if (result != null && result.containsKey('error')) {
@@ -543,7 +569,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       await _loadMessages();
     } catch (e) {
       debugPrint('[CHAT] send transfer failed: $e');
-      _showSendError('发送转账失败：$e');
+      _showSendError('发送收付款失败：$e');
     }
   }
 
@@ -728,21 +754,28 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        leading: Padding(
-          padding: const EdgeInsets.only(left: 8),
-          child: Center(
-            child: ContactAvatar(
+        // 联系人头像放标题区（名字左边紧靠），不占 leading（保留返回箭头）。
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ContactAvatar(
               avatarPath: _avatarPath,
               initials: _displayName.isEmpty
                   ? widget.contactId.isNotEmpty
                       ? widget.contactId[0].toUpperCase()
                       : '?'
                   : _displayName[0].toUpperCase(),
-              radius: 16,
+              radius: 14,
             ),
-          ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                _displayName.isEmpty ? widget.contactId : _displayName,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
         ),
-        title: Text(_displayName.isEmpty ? widget.contactId : _displayName),
         actions: [
           // 阅后即焚设置：变更后发信令给对端同步会话默认值。
           PopupMenuButton<int>(

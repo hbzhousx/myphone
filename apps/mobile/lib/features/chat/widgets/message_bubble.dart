@@ -63,6 +63,18 @@ class MessageBubble extends StatelessWidget {
     return () => _openOnMap();
   }
 
+  /// 收付款卡片点击 → 调起支付宝（alipays://，用户手动收/付款）。
+  VoidCallback? get _transferTap {
+    if (kind != 'transfer') return null;
+    return () {
+      // alipays:// 调起支付宝 App（无需企业资质/签约）。
+      launchUrl(
+        Uri.parse('alipays://platformapi/startapp'),
+        mode: LaunchMode.externalApplication,
+      );
+    };
+  }
+
   Future<void> _openOnMap() async {
     // ★发送端传的是 GCJ-02（高德选点/瓦片坐标系）。接收端直接用：
     //   高德 → GCJ-02 + dev=0；百度 → GCJ-02→BD-09；geo: 兜底 → GCJ-02→WGS-84。
@@ -189,7 +201,7 @@ class MessageBubble extends StatelessWidget {
         ),
       );
     } else if (kind == 'transfer') {
-      // 转账消息卡片：显示金额，点击提示手动支付宝转账。
+      // 收付款消息卡片：显示金额，点击调起支付宝（alipays://）。
       content = Container(
         width: 200,
         padding: const EdgeInsets.all(12),
@@ -209,12 +221,12 @@ class MessageBubble extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    _displayText.isEmpty ? '转账' : _displayText,
+                    _displayText.isEmpty ? '收付款' : _displayText,
                     style: const TextStyle(fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 2),
                   const Text(
-                    '点击打开支付宝手动转账',
+                    '点击调起支付宝',
                     style: TextStyle(fontSize: 12),
                   ),
                 ],
@@ -256,7 +268,11 @@ class MessageBubble extends StatelessWidget {
     }
 
     return GestureDetector(
-      onTap: kind == 'location' ? _locationTap : onAttachmentTap,
+      onTap: kind == 'location'
+          ? _locationTap
+          : kind == 'transfer'
+              ? _transferTap
+              : onAttachmentTap,
       onLongPress: onLongPress,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,

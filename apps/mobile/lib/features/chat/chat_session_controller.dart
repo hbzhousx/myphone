@@ -297,14 +297,16 @@ class ChatSessionController {
     return {'message_id': messageId};
   }
 
-  /// 发送转账消息：X3DH 协商 → 棘轮加密 meta{kind:'transfer', amount} → 发信令 → 落库。
-  /// 消息形态（不接真实支付）：对方点击卡片提示"打开支付宝手动转账"。
+  /// 发送收付款消息：X3DH 协商 → 棘轮加密 meta{kind:'transfer', amount, direction} → 发信令 → 落库。
+  /// [direction] 'receive'=收款（对方点击付款），'pay'=支付（对方点击收款）。
+  /// 点击卡片调 alipays:// 打开支付宝（无需企业资质，用户手动操作）。
   Future<Map<String, dynamic>?> sendTransfer({
     required double amount,
+    String direction = 'receive',
     int expiresInSeconds = 0,
   }) async {
     await _ensureConversation();
-    final body = '转账 $amount 元';
+    final body = direction == 'receive' ? '收款 $amount 元' : '支付 $amount 元';
     var session;
     Map<String, dynamic>? initPayload;
     try {
@@ -323,6 +325,7 @@ class ChatSessionController {
       'kind': 'transfer',
       'body': body,
       'amount': amount,
+      'direction': direction,
     }));
     if (session == null) return {'error': 'session unavailable'};
 
