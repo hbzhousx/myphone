@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../../core/network/service_bridge.dart';
 import '../call_state.dart';
 import '../incoming_call_state.dart';
@@ -17,7 +18,14 @@ class IncomingCallScreen extends ConsumerStatefulWidget {
 class _IncomingCallScreenState extends ConsumerState<IncomingCallScreen> {
   static String _initial(String name) => name.isNotEmpty ? name[0].toUpperCase() : '?';
   @override
+  void initState() {
+    super.initState();
+    // 来电时保持屏幕常亮，防止息屏导致用户错过来电/铃声中断。
+    WakelockPlus.enable();
+  }
+  @override
   void dispose() {
+    WakelockPlus.disable();
     RingtoneService.stop();
     super.dispose();
   }

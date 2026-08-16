@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/network/service_bridge.dart';
 import '../../../core/storage/database.dart';
+import '../../../shared/utils/time_format.dart';
 import '../../contacts/contact_manager.dart';
 import '../call_state.dart';
 
@@ -238,9 +239,10 @@ class _RecentCallsListState extends State<_RecentCallsList> with WidgetsBindingO
                         title: Text(call['contact_name'] as String? ??
                             call['contact_id'] as String? ??
                             'Unknown'),
-                        subtitle: Text(direction == 'incoming'
-                            ? 'Incoming'
-                            : 'Outgoing'),
+                        subtitle: Text(
+                          '${direction == 'incoming' ? '来电' : '去电'} · '
+                          '${formatCallTime((call['started_at'] as num?)?.toInt() ?? 0)}',
+                        ),
                         trailing: const Icon(Icons.call, color: Colors.green),
                         onTap: () {
                           // Tap a history entry to redial the contact.

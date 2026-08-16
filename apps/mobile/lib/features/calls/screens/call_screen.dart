@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../call_state.dart';
 import '../ringtone_service.dart';
 import '../../../core/network/api_client.dart';
@@ -26,6 +27,8 @@ class _CallScreenState extends ConsumerState<CallScreen> {
   @override
   void initState() {
     super.initState();
+    // 通话中保持屏幕常亮，防止息屏导致音频中断（wakelock_plus）。
+    WakelockPlus.enable();
     // Don't await the async init — let the UI render the loading state
     // while microphone permission and WebRTC initialize in the background.
     _initCall();
@@ -122,6 +125,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
 
   @override
   void dispose() {
+    WakelockPlus.disable();
     RingtoneService.stop();
     super.dispose();
   }
