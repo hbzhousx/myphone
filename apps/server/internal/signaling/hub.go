@@ -1,11 +1,15 @@
 package signaling
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -238,7 +242,8 @@ func (c *Client) readPump() {
 		if toID, ok := toUserID.(string); ok && toID != "" {
 			// 聊天消息：目标离线时进 Redis 短期队列，目标在线则按通话路径直转。
 			if s, ok := typ.(string); ok && s == "chatMessage" {
-				c.hub.handleChatMessage(signal, message, toID)
+				fromID, _ := fromUserID.(string)
+				c.hub.handleChatMessage(signal, message, fromID, toID)
 				continue
 			}
 			sendToUser(c.hub, toID, message)
@@ -248,7 +253,13 @@ func (c *Client) readPump() {
 
 // handleChatMessage 处理聊天消息中继。目标在线 → 直转；离线 → 入 Redis 队列（24h TTL）。
 // 队列只存端到端密文信封 + 路由信息；服务器始终无法解密消息内容。
-func (h *Hub) handleChatMessage(signal map[string]interface{}, raw []byte, toID string) {
+func (h *Hub) handleChatMessage(signal map[string]interface{}, raw []byte, fromID, toID string) {
+	// ★机器人（罗吒）消息：@罗吒 走明文旁路（非 E2EE），服务器解析文本 →
+	// 调外部智能体 → 拿回复发回发送方。
+	if strings.HasPrefix(toID, "bot-") {
+		h.handleBotMessage(signal, raw, fromID, toID)
+		return
+	}
 	payload, _ := signal["payload"].(map[string]interface{})
 	msgID, _ := payload["message_id"].(string)
 	if msgID == "" {
@@ -287,6 +298,77 @@ func (h *Hub) handleChatMessage(signal map[string]interface{}, raw []byte, toID 
 	h.redis.RPush(ctx, key, string(raw))
 	h.redis.Expire(ctx, key, chatQueueTTL)
 	log.Printf("[CHAT] queued for offline user=%s message_id=%s", toID, msgID)
+}
+
+// handleBotMessage 处理@罗吒消息：明文 payload（客户端对 bot- 前缀走明文旁路），
+// 解析文本 → 调外部智能体 HTTP API（BOT_AGENT_URL，先定义接口）→ 拿回复 →
+// 作为 bot 回复消息发回发送方。无智能体时返回占位回复。
+func (h *Hub) handleBotMessage(signal map[string]interface{}, raw []byte, fromID, toID string) {
+	payload, _ := signal["payload"].(map[string]interface{})
+	// 明文消息：客户端对 bot 发明文（非棘轮密文），payload 里 ciphertext 是
+	// base64 的明文 JSON？——用明文 kind 约定：客户端发 {kind:'text', body} 明文。
+	var text string
+	if ct, ok := payload["ciphertext"].(string); ok {
+		// 明文旁路：客户端把 JSON 明文 base64 编码放 ciphertext。
+		if b, err := base64.StdEncoding.DecodeString(ct); err == nil {
+			var m map[string]interface{}
+			if json.Unmarshal(b, &m) == nil {
+				text, _ = m["body"].(string)
+			}
+		}
+	}
+	log.Printf("[BOT] from=%s to=%s text=%s", fromID, toID, text)
+	if text == "" {
+		text = "（空消息）"
+	}
+
+	// 调外部智能体（BOT_AGENT_URL 可配置；先定义接口 {user_id, text} → {text}）。
+	reply := "罗吒收到：\"" + text + "\"。智能体对接开发中，稍后回复。"
+	if url := os.Getenv("BOT_AGENT_URL"); url != "" {
+		if resp, err := callBotAgent(url, fromID, text); err == nil {
+			reply = resp
+		}
+	}
+
+	// 构造 bot 回复信令发回发送方（明文，客户端 handleIncoming 识别 bot- 来源）。
+	replyPayload := map[string]interface{}{
+		"kind": "text",
+		"body": reply,
+	}
+	replyCipher, _ := json.Marshal(replyPayload)
+	replySignal := map[string]interface{}{
+		"type":          "chatMessage",
+		"from_user_id":  toID,
+		"to_user_id":    fromID,
+		"message_id":    "bot-reply-" + fmt.Sprint(time.Now().UnixMilli()),
+		"payload": map[string]interface{}{
+			"message_id": "bot-reply-" + fmt.Sprint(time.Now().UnixMilli()),
+			"ciphertext": base64.StdEncoding.EncodeToString(replyCipher),
+			"counter":    0,
+			"plaintext":  true,
+		},
+	}
+	replyRaw, _ := json.Marshal(replySignal)
+	sendToUser(h, fromID, replyRaw)
+	log.Printf("[BOT] reply sent to %s", fromID)
+}
+
+// callBotAgent 调外部智能体 HTTP API（先定义接口 {user_id, text} → {text}）。
+func callBotAgent(url, userID, text string) (string, error) {
+	body, _ := json.Marshal(map[string]string{"user_id": userID, "text": text})
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	return out.Text, nil
 }
 
 // flushChatQueue 上线时按 FIFO 冲刷离线聊天队列并清除。

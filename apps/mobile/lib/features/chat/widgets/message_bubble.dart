@@ -48,7 +48,11 @@ class MessageBubble extends StatelessWidget {
   });
 
   bool get _isAttachment =>
-      kind == 'image' || kind == 'video' || kind == 'file' || kind == 'location';
+      kind == 'image' ||
+      kind == 'video' ||
+      kind == 'file' ||
+      kind == 'location' ||
+      kind == 'transfer';
 
   /// 位置消息点击 → 调地图 App 查看（国内地图 App 用 GCJ-02/BD-09，
   ///   geo: 传 WGS-84 会被误解 → 偏移）。按高德/百度 URI + 显式坐标类型。
@@ -177,6 +181,41 @@ class MessageBubble extends StatelessWidget {
                     style: TextStyle(fontSize: 12, color: textColor),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    } else if (kind == 'transfer') {
+      // 转账消息卡片：显示金额，点击提示手动支付宝转账。
+      content = Container(
+        width: 200,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: isOutgoing
+              ? scheme.primary.withOpacity(0.08)
+              : scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.payment, color: scheme.primary, size: 28),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _displayText.isEmpty ? '转账' : _displayText,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 2),
+                  const Text(
+                    '点击打开支付宝手动转账',
+                    style: TextStyle(fontSize: 12),
                   ),
                 ],
               ),

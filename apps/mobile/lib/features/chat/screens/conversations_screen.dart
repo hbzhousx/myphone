@@ -42,6 +42,23 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
 
   Future<void> _loadConversations() async {
     try {
+      // ★注入机器人罗吒助手会话（常驻会话列表，文件助手式）。
+      await DatabaseManager.instance.upsertConversation({
+        'id': 'conv-bot-luozha',
+        'remote_user_id': 'bot-luozha',
+        'remote_display_name': '罗吒',
+      });
+      // 机器人作为联系人（供发起聊天选择）。
+      final bot = await DatabaseManager.instance
+          .getContact('bot-luozha');
+      if (bot == null) {
+        await DatabaseManager.instance.upsertContact({
+          'id': 'bot-luozha',
+          'display_name': '罗吒',
+          'phone_hash': 'bot:luozha',
+          'is_registered': 0,
+        });
+      }
       var rows = await DatabaseManager.instance.getConversations();
       rows = await _enrichDisplayNames(rows);
       if (!mounted) return;

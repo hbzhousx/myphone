@@ -42,7 +42,7 @@ class ChatScreen extends ConsumerStatefulWidget {
 }
 
 /// 附件来源。
-enum _AttachSource { gallery, camera, file, location }
+enum _AttachSource { gallery, camera, file, location, transfer }
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _inputController = TextEditingController();
@@ -259,6 +259,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               title: const Text('位置'),
               onTap: () => Navigator.pop(ctx, _AttachSource.location),
             ),
+            ListTile(
+              leading: const Icon(Icons.payment_outlined),
+              title: const Text('转账'),
+              onTap: () => Navigator.pop(ctx, _AttachSource.transfer),
+            ),
           ],
         ),
       ),
@@ -274,6 +279,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         await _sendFilePicker();
       case _AttachSource.location:
         await _sendLocation();
+      case _AttachSource.transfer:
+        await _sendTransfer();
     }
   }
 
@@ -482,6 +489,62 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     try {
       _loader?.onDiag?.call(step, data);
     } catch (_) {}
+  }
+
+  /// 转账消息：输入金额 → 确认 → 发 kind='transfer' 消息（不接真实支付）。
+  Future<void> _sendTransfer() async {
+    if (!mounted) return;
+    final amountController = TextEditingController();
+    double? amount;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('转账'),
+        content: TextField(
+          controller: amountController,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+            labelText: '金额（元）',
+            prefixIcon: Icon(Icons.payment),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              amount = double.tryParse(amountController.text.trim());
+              if (amount == null || amount! <= 0) return;
+              Navigator.pop(ctx, true);
+            },
+            child: const Text('发送'),
+          ),
+        ],
+      ),
+    );
+    amountController.dispose();
+    if (confirmed != true || amount == null || !mounted) return;
+    try {
+      final controller = await ref
+          .read(chatStateProvider.notifier)
+          .controllerFor(
+            remoteUserId: widget.contactId,
+            conversationId: _conversationId,
+          );
+      final result = await controller.sendTransfer(
+        amount: amount!,
+        expiresInSeconds: _disappearSeconds,
+      );
+      if (result != null && result.containsKey('error')) {
+        _showSendError(result['error'].toString());
+      }
+      await _loadMessages();
+    } catch (e) {
+      debugPrint('[CHAT] send transfer failed: $e');
+      _showSendError('发送转账失败：$e');
+    }
   }
 
   void _showSendError(String message) {

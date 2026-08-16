@@ -45,6 +45,7 @@ func (db *DB) Migrate() error {
 			signature TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE INDEX IF NOT EXISTS idx_pre_keys_used ON pre_keys(user_id, is_used)`,
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE`,
 		`CREATE TABLE IF NOT EXISTS cdr (
 			id SERIAL PRIMARY KEY,
 			call_id TEXT NOT NULL,

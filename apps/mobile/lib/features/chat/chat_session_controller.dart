@@ -58,6 +58,11 @@ class ChatSessionController {
   }) async {
     debugPrint('[SEND] sendText begin body=$body expires=$expiresInSeconds');
     await _ensureConversation();
+    // ★机器人（罗吒）消息：明文旁路（不 E2EE X3DH）。机器人是服务器转发的
+    //   智能体助手，消息内容为日常任务（非机密），需服务器见明文才能转发智能体。
+    if (_remoteUserId.startsWith('bot-')) {
+      return _sendBotText(body, expiresInSeconds: expiresInSeconds);
+    }
     // ★每次发送都重新 X3DH 协商（Signal PreKeySignalMessage 语义）：
     //   重新取对端 bundle（当前 SPK/OTP 公钥）+ 新 ephemeral → 新会话 + 新
     //   init_payload。这样接收方每次都能用它重建到**匹配当前 SPK** 的会话。
@@ -159,6 +164,52 @@ class ChatSessionController {
     return {'message_id': messageId};
   }
 
+  /// 机器人（罗吒）明文发送：不 X3DH，直接把明文 JSON base64 放 ciphertext，
+  /// 服务器解析转发智能体。落库 kind=text（与普通文字同渲染）。
+  Future<Map<String, dynamic>?> _sendBotText(
+    String body, {
+    int expiresInSeconds = 0,
+  }) async {
+    final messageId = _newId();
+    // 明文 JSON base64 放 ciphertext（服务器 handleBotMessage 解码取 body）。
+    final plain = utf8.encode(jsonEncode({'kind': 'text', 'body': body}));
+    final ciphertextB64 = base64Encode(plain);
+
+    await _db.insertMessage({
+      'id': messageId,
+      'conversation_id': _conversationId,
+      'direction': 'outgoing',
+      'kind': 'text',
+      'body': body,
+      'status': 'sending',
+      'expires_in_seconds': expiresInSeconds,
+      'sent_at': DateTime.now().millisecondsSinceEpoch,
+    });
+    await _touchConversation(body, messageId);
+
+    try {
+      final sent = await _signaling.sendChatSignal(ChatSignal(
+        type: ChatSignalType.chatMessage,
+        fromUserId: _localUserId,
+        toUserId: _remoteUserId,
+        messageId: messageId,
+        payload: {
+          'message_id': messageId,
+          'ciphertext': ciphertextB64,
+          'counter': 0,
+          'plaintext': true,
+        },
+      ));
+      await _db.updateMessageStatus(messageId, sent ? 'sent' : 'failed');
+      if (!sent) return {'error': 'WS 未连接，消息未发出'};
+    } catch (e) {
+      await _db.updateMessageStatus(messageId, 'failed');
+      return {'error': 'send failed: $e'};
+    }
+
+    return {'message_id': messageId};
+  }
+
   /// 发送位置消息：X3DH 协商 → 棘轮加密 meta{kind:location, 坐标} → 发信令 → 落库。
   /// 参考微信简化版：发送坐标 + 地址文本（body），接收方点击调系统地图。
   Future<Map<String, dynamic>?> sendLocation({
@@ -246,6 +297,116 @@ class ChatSessionController {
     return {'message_id': messageId};
   }
 
+  /// 发送转账消息：X3DH 协商 → 棘轮加密 meta{kind:'transfer', amount} → 发信令 → 落库。
+  /// 消息形态（不接真实支付）：对方点击卡片提示"打开支付宝手动转账"。
+  Future<Map<String, dynamic>?> sendTransfer({
+    required double amount,
+    int expiresInSeconds = 0,
+  }) async {
+    await _ensureConversation();
+    final body = '转账 $amount 元';
+    var session;
+    Map<String, dynamic>? initPayload;
+    try {
+      initPayload = await _sessions.establishAsInitiator(
+        remoteUserId: _remoteUserId,
+        conversationId: _conversationId,
+      );
+      session = await _sessions.loadSession(_conversationId);
+      if (session == null) return {'error': 'session unavailable'};
+    } catch (e) {
+      return {'error': 'no session: $e'};
+    }
+
+    final messageId = _newId();
+    final plaintext = utf8.encode(jsonEncode({
+      'kind': 'transfer',
+      'body': body,
+      'amount': amount,
+    }));
+    if (session == null) return {'error': 'session unavailable'};
+
+    final aad = ChatCrypto.associatedData(
+      senderUserId: _localUserId,
+      recipientUserId: _remoteUserId,
+      conversationId: _conversationId,
+    );
+    final enc = await ChatCrypto.encryptMessage(
+      session,
+      plaintext,
+      messageId: messageId,
+      aad: aad,
+    );
+    await _sessions.saveSession(_conversationId, enc.session);
+
+    // Signal 模式：先插本地消息行（含金额），再发 WS。
+    await _db.insertMessage({
+      'id': messageId,
+      'conversation_id': _conversationId,
+      'direction': 'outgoing',
+      'kind': 'transfer',
+      'body': body,
+      'status': 'sending',
+      'expires_in_seconds': expiresInSeconds,
+      'amount': amount,
+      'sent_at': DateTime.now().millisecondsSinceEpoch,
+    });
+    await _touchConversation(body, messageId);
+
+    try {
+      final sent = await _signaling.sendChatSignal(ChatSignal(
+        type: ChatSignalType.chatMessage,
+        fromUserId: _localUserId,
+        toUserId: _remoteUserId,
+        messageId: messageId,
+        payload: {
+          'message_id': messageId,
+          'ciphertext': base64Encode(enc.ciphertext),
+          'counter': enc.counter,
+          'expires_in_seconds': expiresInSeconds,
+          if (initPayload != null) 'init_payload': initPayload,
+        },
+      ));
+      await _db.updateMessageStatus(messageId, sent ? 'sent' : 'failed');
+      if (!sent) return {'error': 'WS 未连接，消息未发出'};
+    } catch (e) {
+      await _db.updateMessageStatus(messageId, 'failed');
+      return {'error': 'send failed: $e'};
+    }
+
+    return {'message_id': messageId};
+  }
+
+  /// 机器人明文回复：base64 解码明文 JSON → 落库 text 消息 → 回执。
+  Future<void> _handlePlaintextBotMessage({
+    required String messageId,
+    required String ciphertextB64,
+    required int expiresIn,
+  }) async {
+    try {
+      final decoded = base64Decode(ciphertextB64);
+      final parsed = jsonDecode(utf8.decode(decoded)) as Map<String, dynamic>;
+      final kind = parsed['kind'] as String? ?? 'text';
+      final body = parsed['body'] as String? ?? '';
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await _db.insertMessage({
+        'id': messageId,
+        'conversation_id': _conversationId,
+        'direction': 'incoming',
+        'kind': kind,
+        'body': body,
+        'status': 'delivered',
+        'expires_in_seconds': expiresIn,
+        'received_at': now,
+        'created_at': now,
+      });
+      await _touchConversation(body, messageId);
+      _sendReceipt(messageId, 'delivered');
+    } catch (e) {
+      debugPrint('[RECV] bot plaintext failed: $e');
+    }
+  }
+
   /// 处理入站 chatMessage（解密、入库、回执、阅后即焚）。
   Future<void> handleIncoming(ChatSignal signal) async {
     debugPrint('[RECV] handleIncoming type=${signal.type} from=${signal.fromUserId}');
@@ -268,6 +429,17 @@ class ChatSessionController {
     if (ciphertextB64 == null || counter == null) {
       debugPrint('[RECV] no ciphertext/counter, ignore');
       _reportDiag('incoming:no-cipher', {'msg': messageId});
+      return;
+    }
+
+    // ★机器人（罗吒）明文回复：plaintext=true，ciphertext 是 base64 明文 JSON，
+    //   直接解码（不经棘轮解密）。
+    if (payload['plaintext'] == true) {
+      await _handlePlaintextBotMessage(
+        messageId: messageId,
+        ciphertextB64: ciphertextB64,
+        expiresIn: (payload['expires_in_seconds'] as num?)?.toInt() ?? 0,
+      );
       return;
     }
 
@@ -407,6 +579,8 @@ class ChatSessionController {
       // 位置消息坐标（kind=location）。
       if (kind == 'location') 'latitude': (parsed['latitude'] as num?)?.toDouble(),
       if (kind == 'location') 'longitude': (parsed['longitude'] as num?)?.toDouble(),
+      // 转账消息金额（kind=transfer）。
+      if (kind == 'transfer') 'amount': (parsed['amount'] as num?)?.toDouble(),
     });
     debugPrint('[RECV] incoming row inserted');
     _reportDiag('incoming:inserted', {'msg': messageId, 'kind': kind});
