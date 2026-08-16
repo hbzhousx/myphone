@@ -42,6 +42,46 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// Middleware 是 AuthMiddleware 的 DB 增强版：JWT 校验通过后，再校验该用户
+// 仍存在于 users 表且 status='active'。用于"删除用户后旧 token 立即失效"：
+// 被删用户（或已禁用用户）即便持有未过期 token，也会在此被 401 拒绝。
+func (h *AuthHandler) Middleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+			// Fallback: WebSocket connections pass token as query parameter.
+			if q := r.URL.Query().Get("token"); q != "" {
+				auth = "Bearer " + q
+			}
+		}
+		if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		tokenStr := strings.TrimPrefix(auth, "Bearer ")
+		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) { return jwtSecret, nil })
+		if err != nil || !token.Valid {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		userID, _ := token.Claims.(jwt.MapClaims)["sub"].(string)
+		if userID == "" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		// ★删号/token 即时失效：用户必须存在且处于启用状态。
+		//   被删用户或已禁用用户 → 直接 401（即使 JWT 未过期）。
+		var status string
+		err = h.db.QueryRow(`SELECT status FROM users WHERE id=$1`, userID).Scan(&status)
+		if err != nil || status != "active" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(r.Context(), "userID", userID)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 type AuthHandler struct {
 	db    *models.DB
 	redis *models.Client
@@ -51,55 +91,11 @@ func NewAuthHandler(db *models.DB, redis *models.Client) *AuthHandler {
 	return &AuthHandler{db: db, redis: redis}
 }
 
-type RegisterRequest struct {
-	PhoneNumber       string `json:"phone_number"`
-	Password          string `json:"password"`
-	IdentityPublicKey string `json:"identity_public_key"`
-	DisplayName       string `json:"display_name"`
-}
-
+// Register 已停用：安全加固后禁止自助注册。
+// 所有用户必须由管理员通过管理后台(/admin → 添加用户)录入，然后凭手机号+密码登录。
+// 保留此端点仅用于给旧版客户端返回明确错误，不再创建任何用户。
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
-	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
-		return
-	}
-	if req.PhoneNumber == "" || req.Password == "" || req.IdentityPublicKey == "" {
-		http.Error(w, `{"error":"missing required fields"}`, http.StatusBadRequest)
-		return
-	}
-	passwordHash, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	userID := generateID()
-	// Store the plaintext phone number as the display name so callers/callees
-	// can show a readable number instead of a phone-hash or UUID.
-	displayName := req.DisplayName
-	if displayName == "" {
-		displayName = req.PhoneNumber
-	}
-	// ★修复：已存在的手机号（重装/清数据后重新注册）必须更新 identity_public_key。
-	//   否则本地重新生成的新 identity 与服务器旧值不一致 → 对端取 bundle 拿到旧
-	//   IK，本机用新 IK → X3DH DH1/DH2 不对称 → 每条消息解密 MAC 失败。
-	//   用 ON CONFLICT 在 phone_hash 唯一冲突时更新 identity（保留原 user_id/密码）。
-	_, err := h.db.Exec(
-		`INSERT INTO users (id, phone_hash, identity_public_key, password_hash, display_name) VALUES ($1,$2,$3,$4,$5)
-		 ON CONFLICT (phone_hash) DO UPDATE SET identity_public_key = EXCLUDED.identity_public_key`,
-		userID, hashPhone(req.PhoneNumber), req.IdentityPublicKey, string(passwordHash), displayName,
-	)
-	if err != nil {
-		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
-		return
-	}
-	// 已存在用户（ON CONFLICT 更新）时，取数据库里的原 user_id，保持身份稳定
-	// （对端缓存的 user_id 不变，否则消息路由会断）。
-	var actualID string
-	if err := h.db.QueryRow(
-		`SELECT id FROM users WHERE phone_hash = $1`, hashPhone(req.PhoneNumber),
-	).Scan(&actualID); err != nil {
-		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
-		return
-	}
-	token := generateJWT(actualID)
-	json.NewEncoder(w).Encode(map[string]interface{}{"token": token, "user_id": actualID})
+	http.Error(w, `{"error":"self-registration disabled; users are provisioned by an administrator"}`, http.StatusForbidden)
 }
 
 type LoginRequest struct {

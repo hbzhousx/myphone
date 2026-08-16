@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/myphone/server/internal/models"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Handler struct {
@@ -37,6 +39,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Get("/admin/api/users/{userID}", h.APIUserDetail)
 	r.Post("/admin/api/users/{userID}/disable", h.APIDisableUser)
 	r.Post("/admin/api/users/{userID}/enable", h.APIEnableUser)
+	r.Post("/admin/api/users/{userID}/delete", h.APIDeleteUser)
 
 	// API: Connections
 	r.Get("/admin/api/connections", h.APIConnections)
@@ -170,10 +173,13 @@ func (h *Handler) APICreateUser(w http.ResponseWriter, r *http.Request) {
 		req.IdentityPublicKey = "admin-created"
 	}
 
+	// ★密码必须与 /v1/auth/login 的校验方式一致（bcrypt）。
+	//   之前这里用 SHA256 存储，导致管理员创建的用户永远无法登录（登录走 bcrypt 校验）。
+	passwordHash, _ := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	_, err := h.db.Exec(
 		`INSERT INTO users (id, phone_hash, display_name, identity_public_key, password_hash) VALUES ($1,$2,$3,$4,$5)`,
 		generateID(), hashPhone(req.PhoneNumber), req.DisplayName,
-		req.IdentityPublicKey, hashPassword(req.Password),
+		req.IdentityPublicKey, string(passwordHash),
 	)
 	if err != nil {
 		http.Error(w, `{"error":"user already exists"}`, http.StatusConflict)
@@ -211,6 +217,46 @@ func (h *Handler) APIEnableUser(w http.ResponseWriter, r *http.Request) {
 	uid := chi.URLParam(r, "userID")
 	h.db.Exec("UPDATE users SET status='active' WHERE id=$1", uid)
 	h.logAdmin("enable_user", uid)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// APIDeleteUser 永久删除用户及其预密钥（不可恢复）。
+// pre_keys / signed_pre_keys 有外键 REFERENCES users(id) 且无 CASCADE，
+// 必须先删子表再删 users；cdr（无外键）保留作为通话历史。
+// 注意：删除后该用户旧 token 虽未过期，但预密钥上传会被外键拒绝、bundle 查不到，
+// 实际已无法正常使用。
+func (h *Handler) APIDeleteUser(w http.ResponseWriter, r *http.Request) {
+	uid := chi.URLParam(r, "userID")
+	tx, err := h.db.Begin()
+	if err != nil {
+		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM pre_keys WHERE user_id=$1`, uid); err != nil {
+		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM signed_pre_keys WHERE user_id=$1`, uid); err != nil {
+		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
+		return
+	}
+	res, err := tx.Exec(`DELETE FROM users WHERE id=$1`, uid)
+	if err != nil {
+		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
+		return
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		http.Error(w, `{"error":"db error"}`, http.StatusInternalServerError)
+		return
+	}
+	h.logAdmin("delete_user", uid)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
@@ -323,21 +369,21 @@ func (h *Handler) logAdmin(action, detail string) {
 	h.db.Exec("INSERT INTO admin_logs (action, detail, operator) VALUES ($1,$2,'admin')", action, detail)
 }
 
+// generateID 生成 16 字节随机 ID（输出 32 位 hex）。
+// ★改为 crypto/rand 真随机：旧实现基于时间戳派生，可预测且同纳秒会碰撞。
+//   格式与旧实现一致（32 位 hex），对存量/下游完全透明。
 func generateID() string {
 	b := make([]byte, 16)
-	for i := range b {
-		b[i] = byte(time.Now().UnixNano()>>(i*4)) ^ byte(i*7)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand 失败属致命环境错误；退回到时间戳派生（极罕见），
+		// 避免创建用户流程直接报错。
+		return fmt.Sprintf("%x", time.Now().UnixNano())
 	}
-	return fmt.Sprintf("%x", b)
+	return hex.EncodeToString(b)
 }
 
 func hashPhone(phone string) string {
 	h := sha256.Sum256([]byte("myphone-salt:" + phone))
-	return hex.EncodeToString(h[:])
-}
-
-func hashPassword(pw string) string {
-	h := sha256.Sum256([]byte(pw))
 	return hex.EncodeToString(h[:])
 }
 
@@ -367,6 +413,7 @@ h1{font-size:22px;margin-bottom:20px}
 table{width:100%;border-collapse:collapse;background:#1a2836;border-radius:10px;overflow:hidden;font-size:13px}
 th{text-align:left;padding:10px 14px;font-size:11px;color:#8899a6;text-transform:uppercase;border-bottom:1px solid #253545}
 td{padding:9px 14px;border-bottom:1px solid #253545;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td.mono{white-space:normal;word-break:break-all;max-width:300px}
 tr:last-child td{border-bottom:none}
 tr:hover{background:rgba(26,115,232,.06)}
 .badge{display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600}
@@ -501,11 +548,12 @@ async function loadUsers(p){
  const d=await fetchJSON('/admin/api/users?page='+usPage+'&search='+encodeURIComponent(s)+'&status='+st);
  let rows='';
  d.users.forEach(u=>{
-  rows+='<tr><td class="mono" title="'+u.id+'">'+u.id.substring(0,12)+'...</td>'+
+  rows+='<tr><td class="mono" title="'+u.id+'">'+u.id+'</td>'+
   '<td><span class="badge '+(u.status==='active'?'online':'offline')+'">'+(u.status==='active'?'启用':'禁用')+'</span></td>'+
   '<td>'+(u.created_at?new Date(u.created_at).toLocaleString():'-')+'</td>'+
   '<td><button class="btn sm" onclick="showUserDetail(\''+u.id+'\')">详情</button> '+
-  (u.status==='active'?'<button class="btn sm danger" onclick="disableUser(\''+u.id+'\')">禁用</button>':'<button class="btn sm primary" onclick="enableUser(\''+u.id+'\')">启用</button>')+'</td></tr>';
+  (u.status==='active'?'<button class="btn sm danger" onclick="disableUser(\''+u.id+'\')">禁用</button>':'<button class="btn sm primary" onclick="enableUser(\''+u.id+'\')">启用</button>')+
+  ' <button class="btn sm danger" onclick="deleteUser(\''+u.id+'\')">删除</button></td></tr>';
  });
  document.getElementById('us-table').innerHTML=rows||'<tr><td colspan="4" style="text-align:center;color:#8899a6;padding:20px">无匹配用户</td></tr>';
  let pager='';
@@ -563,13 +611,19 @@ async function enableUser(uid){
  await fetch('/admin/api/users/'+uid+'/enable',{method:'POST'});
  toastShow('已启用: '+uid,'success'); loadUsers(usPage);
 }
+async function deleteUser(uid){
+ if(!confirm('确认永久删除用户 '+uid+' ?\n将同时删除其所有预密钥,此操作不可恢复!')) return;
+ const r=await fetch('/admin/api/users/'+uid+'/delete',{method:'POST'});
+ if(r.ok){toastShow('已删除: '+uid,'success'); loadUsers(usPage);}
+ else{const e=await r.json(); toastShow('删除失败: '+e.error,'error');}
+}
 
 // === Connections ===
 async function loadConnections(){
  const d=await fetchJSON('/admin/api/connections');
  let rows='';
  (d.connections||[]).forEach(c=>{
-  rows+='<tr><td class="mono" title="'+c.user_id+'">'+c.user_id.substring(0,12)+'...</td>'+
+  rows+='<tr><td class="mono" title="'+c.user_id+'">'+c.user_id+'</td>'+
   '<td>'+c.connected+'</td><td><span class="badge online">'+c.uptime+'</span></td></tr>';
  });
  document.getElementById('cn-table').innerHTML=rows||'<tr><td colspan="3" style="text-align:center;color:#8899a6;padding:20px">暂无在线连接</td></tr>';
@@ -610,7 +664,7 @@ async function loadKeyStatus(){
   '<div class="card"><div class="label">低库存用户</div><div class="value '+(d.low_key_users>0?'red':'green')+'">'+d.low_key_users+'</div></div>';
  let rows='';
  (d.user_key_detail||[]).forEach(u=>{
-  rows+='<tr><td class="mono">'+u.user_id.substring(0,12)+'...</td>'+
+  rows+='<tr><td class="mono">'+u.user_id+'</td>'+
   '<td>'+u.display_name+'</td><td>'+u.unused+'</td><td>'+u.total+'</td>'+
   '<td>'+(u.warning?'<span class="badge warn">⚠ 不足</span>':'<span class="badge online">正常</span>')+'</td></tr>';
  });

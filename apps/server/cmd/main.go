@@ -62,23 +62,23 @@ func main() {
 	r.Route("/v1", func(r chi.Router) {
 		r.Post("/auth/register", authHandler.Register)
 		r.Post("/auth/login", authHandler.Login)
-		r.Post("/keys/prekeys", api.AuthMiddleware(keysHandler.UploadPreKeys))
-		r.Get("/keys/prekeys/{userID}", api.AuthMiddleware(keysHandler.GetPreKeys))
-		r.Get("/keys/bundle/{userID}", api.AuthMiddleware(keysHandler.GetKeyBundle))
-		r.Post("/keys/signed-prekey", api.AuthMiddleware(keysHandler.UploadSignedPreKey))
-		r.Put("/keys/identity", api.AuthMiddleware(keysHandler.UpdateIdentity))
-		r.Get("/users/by-phone/{phoneHash}", api.AuthMiddleware(authHandler.LookupByPhoneHash))
-		r.Get("/users/{userID}", api.AuthMiddleware(authHandler.LookupByUserId))
-		r.Post("/users/presence", api.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		r.Post("/keys/prekeys", authHandler.Middleware(keysHandler.UploadPreKeys))
+		r.Get("/keys/prekeys/{userID}", authHandler.Middleware(keysHandler.GetPreKeys))
+		r.Get("/keys/bundle/{userID}", authHandler.Middleware(keysHandler.GetKeyBundle))
+		r.Post("/keys/signed-prekey", authHandler.Middleware(keysHandler.UploadSignedPreKey))
+		r.Put("/keys/identity", authHandler.Middleware(keysHandler.UpdateIdentity))
+		r.Get("/users/by-phone/{phoneHash}", authHandler.Middleware(authHandler.LookupByPhoneHash))
+		r.Get("/users/{userID}", authHandler.Middleware(authHandler.LookupByUserId))
+		r.Post("/users/presence", authHandler.Middleware(func(w http.ResponseWriter, r *http.Request) {
 			signaling.HandlePresence(hub, w, r)
 		}))
-		r.Post("/contacts/discover", api.AuthMiddleware(contactDiscovery.Discover))
-		r.Post("/attachments", api.AuthMiddleware(attachmentsHandler.Upload))
-		r.Get("/attachments/{id}", api.AuthMiddleware(attachmentsHandler.Download))
-		r.Delete("/attachments/{id}", api.AuthMiddleware(attachmentsHandler.Delete))
+		r.Post("/contacts/discover", authHandler.Middleware(contactDiscovery.Discover))
+		r.Post("/attachments", authHandler.Middleware(attachmentsHandler.Upload))
+		r.Get("/attachments/{id}", authHandler.Middleware(attachmentsHandler.Download))
+		r.Delete("/attachments/{id}", authHandler.Middleware(attachmentsHandler.Delete))
 	})
 
-	r.Get("/ws", api.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/ws", authHandler.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		signaling.HandleWebSocket(hub, w, r)
 	}))
 
