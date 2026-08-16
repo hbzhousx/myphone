@@ -44,6 +44,15 @@ echo "==> myphone 服务已启动"
 if [ -f /etc/nginx/.myphone-htpasswd ] && [ -z "${MYPHONE_ADMIN_PASSWORD:-}" ]; then
     echo "==> 复用已有 htpasswd（如需改密，设置 MYPHONE_ADMIN_PASSWORD 后重跑）"
 else
+    # 用户手动指定 MYPHONE_ADMIN_PASSWORD 时强制校验强度；
+    # 自动生成（openssl rand -base64 12，96 bit 熵）的一律够强，无需校验。
+    if [ -n "${MYPHONE_ADMIN_PASSWORD:-}" ]; then
+        PW="${MYPHONE_ADMIN_PASSWORD}"
+        if [ "${#PW}" -lt 12 ] || ! [[ "$PW" =~ [^a-zA-Z0-9] ]]; then
+            echo "错误：MYPHONE_ADMIN_PASSWORD 过弱（需 ≥12 字符且包含特殊字符）" >&2
+            exit 1
+        fi
+    fi
     ADMIN_PASSWORD="${MYPHONE_ADMIN_PASSWORD:-$(openssl rand -base64 12)}"
     command -v htpasswd >/dev/null 2>&1 || { echo "错误：缺少 htpasswd（apache2-utils/httpd-tools）" >&2; exit 1; }
     htpasswd -cb /etc/nginx/.myphone-htpasswd "$ADMIN_USER" "$ADMIN_PASSWORD"
