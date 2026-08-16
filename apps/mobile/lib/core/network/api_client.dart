@@ -25,23 +25,6 @@ class ApiClient {
 
   // --- Auth ---
 
-  Future<Map<String, dynamic>> register({
-    required String phoneNumber,
-    required String password,
-    required String identityPublicKey,
-  }) async {
-    final response = await _client.post(
-      Uri.parse('$_baseUrl/auth/register'),
-      headers: await _authHeaders(),
-      body: jsonEncode({
-        'phone_number': phoneNumber,
-        'password': password,
-        'identity_public_key': identityPublicKey,
-      }),
-    );
-    return _handleResponse(response);
-  }
-
   Future<Map<String, dynamic>> login({
     required String phoneNumber,
     required String password,

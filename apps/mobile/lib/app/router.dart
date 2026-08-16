@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../features/auth/screens/login_screen.dart';
 import '../features/auth/screens/phone_login_screen.dart';
-import '../features/auth/screens/register_screen.dart';
 import '../features/calls/screens/call_screen.dart';
 import '../features/calls/screens/dialer_screen.dart';
 import '../features/calls/screens/incoming_call_screen.dart';
@@ -24,7 +23,6 @@ final routerProvider = Provider<GoRouter>((ref) {
     redirect: (context, state) async {
       final loggedIn = await AuthGuard.isLoggedIn();
       final isAuthRoute = state.matchedLocation == '/login' ||
-          state.matchedLocation == '/register' ||
           state.matchedLocation == '/phone-login';
 
       if (!loggedIn && !isAuthRoute) return '/login';
@@ -35,10 +33,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/login',
         builder: (context, state) => const LoginScreen(),
-      ),
-      GoRoute(
-        path: '/register',
-        builder: (context, state) => const RegisterScreen(),
       ),
       GoRoute(
         path: '/phone-login',

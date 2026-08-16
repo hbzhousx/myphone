@@ -112,10 +112,7 @@ class _PhoneLoginScreenState extends ConsumerState<PhoneLoginScreen> {
                     : const Text('Sign In'),
               ),
               const SizedBox(height: 16),
-              TextButton(
-                onPressed: () => context.go('/register'),
-                child: const Text('Don\'t have an account? Register'),
-              ),
+              // 注册已停用：用户由管理员在管理后台录入后，凭手机号+密码登录。
             ],
           ),
         ),
