@@ -16,6 +16,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../../../core/permission/permission_service.dart';
 import '../../../core/storage/database.dart';
+import '../../../shared/widgets/contact_avatar.dart';
 import '../chat_message_repository.dart';
 import '../chat_session_controller.dart' show kChatDiag;
 import '../chat_state.dart';
@@ -48,6 +49,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   List<Map<String, dynamic>> _messages = [];
   bool _loading = true;
   String _displayName = '';
+  String? _avatarPath;
   int _disappearSeconds = 0;
   Timer? _pollTimer;
 
@@ -80,17 +82,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     super.dispose();
   }
 
-  /// 联系人 id → 展示名（联系人表匹配失败则回退为原始 id）。
+  /// 联系人 id → 展示名 + 头像（联系人表匹配失败则回退为原始 id）。
   Future<void> _loadContact() async {
     String name = widget.contactId;
+    String? avatar;
     try {
       final row = await DatabaseManager.instance.getContact(widget.contactId);
       if (row != null) {
         final n = row['display_name'] as String?;
         if (n != null && n.isNotEmpty) name = n;
+        avatar = row['avatar_path'] as String?;
       }
     } catch (_) {}
-    if (mounted) setState(() => _displayName = name);
+    if (mounted) setState(() {
+      _displayName = name;
+      _avatarPath = avatar;
+    });
   }
 
   /// 懒建会话消息仓库：首次调用等 controllerFor（内部等 chat ready）后构造，
@@ -658,6 +665,20 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        leading: Padding(
+          padding: const EdgeInsets.only(left: 8),
+          child: Center(
+            child: ContactAvatar(
+              avatarPath: _avatarPath,
+              initials: _displayName.isEmpty
+                  ? widget.contactId.isNotEmpty
+                      ? widget.contactId[0].toUpperCase()
+                      : '?'
+                  : _displayName[0].toUpperCase(),
+              radius: 16,
+            ),
+          ),
+        ),
         title: Text(_displayName.isEmpty ? widget.contactId : _displayName),
         actions: [
           // 阅后即焚设置：变更后发信令给对端同步会话默认值。

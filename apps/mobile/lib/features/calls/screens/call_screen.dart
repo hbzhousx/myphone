@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../shared/widgets/contact_avatar.dart';
 import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -23,6 +24,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
   bool _isMuted = false;
   bool _isSpeakerOn = false;
   bool _hasCall = false;
+  String? _avatarPath;
 
   @override
   void initState() {
@@ -73,7 +75,11 @@ class _CallScreenState extends ConsumerState<CallScreen> {
       final contact = await DatabaseManager.instance.getContact(widget.contactId);
       if (contact != null && contact['display_name'] is String && (contact['display_name'] as String).isNotEmpty) {
         displayName = contact['display_name'] as String;
-      } else {
+      }
+      if (contact != null) {
+        _avatarPath = contact['avatar_path'] as String?;
+      }
+      if (contact == null || (contact['display_name'] is String && (contact['display_name'] as String).isEmpty)) {
         // Not in local contacts (e.g. redial from history) — ask the server.
         final client = ApiClient();
         try {
@@ -172,11 +178,11 @@ class _CallScreenState extends ConsumerState<CallScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             const Spacer(flex: 2),
-            CircleAvatar(
-                radius: 48,
-                backgroundColor: Colors.white24,
-                child: Text(_initial(call.contactName),
-                    style: const TextStyle(fontSize: 36, color: Colors.white))),
+            ContactAvatar(
+              avatarPath: _avatarPath,
+              initials: _initial(call.contactName),
+              radius: 48,
+            ),
             const SizedBox(height: 16),
             Text(call.contactName,
                 style: const TextStyle(

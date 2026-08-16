@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/storage/database.dart';
+import '../../../shared/widgets/contact_avatar.dart';
 import '../chat_state.dart';
 
 class ConversationsScreen extends ConsumerStatefulWidget {
@@ -61,19 +62,21 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
     final out = <Map<String, dynamic>>[];
     for (final conv in rows) {
       var name = conv['remote_display_name'] as String?;
-      if (name == null || name.isEmpty) {
-        final remoteId = conv['remote_user_id'] as String?;
-        if (remoteId != null) {
-          try {
-            final contact = await DatabaseManager.instance.getContact(remoteId);
-            if (contact != null) {
+      String? avatarPath = conv['_avatar_path'] as String?;
+      final remoteId = conv['remote_user_id'] as String?;
+      if (remoteId != null) {
+        try {
+          final contact = await DatabaseManager.instance.getContact(remoteId);
+          if (contact != null) {
+            if (name == null || name.isEmpty) {
               name = contact['display_name'] as String?;
             }
-          } catch (_) {}
-        }
-        name ??= remoteId ?? '';
+            avatarPath ??= contact['avatar_path'] as String?;
+          }
+        } catch (_) {}
       }
-      out.add({...conv, '_display_name': name});
+      name ??= remoteId ?? '';
+      out.add({...conv, '_display_name': name, '_avatar_path': avatarPath});
     }
     return out;
   }
@@ -120,7 +123,10 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
                   final c = contacts[i];
                   final name = (c['display_name'] as String?) ?? '';
                   return ListTile(
-                    leading: CircleAvatar(child: Text(_initialsOf(name))),
+                    leading: ContactAvatar(
+                      avatarPath: c['avatar_path'] as String?,
+                      initials: _initialsOf(name),
+                    ),
                     title: Text(name,
                         maxLines: 1, overflow: TextOverflow.ellipsis),
                     onTap: () => Navigator.pop(ctx, c),
@@ -195,7 +201,10 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
                     final remoteId = conv['remote_user_id'] as String? ?? '';
 
                     return ListTile(
-                      leading: CircleAvatar(child: Text(_initialsOf(name))),
+                      leading: ContactAvatar(
+                        avatarPath: conv['_avatar_path'] as String?,
+                        initials: _initialsOf(name),
+                      ),
                       title: Text(
                         name,
                         maxLines: 1,

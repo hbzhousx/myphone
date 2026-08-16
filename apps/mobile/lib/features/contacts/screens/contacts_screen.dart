@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import '../../../core/network/api_client.dart';
 import '../../../core/storage/database.dart';
 import '../../../shared/models/contact.dart';
+import '../../../shared/widgets/contact_avatar.dart';
 import '../contact_manager.dart';
 
 class ContactsScreen extends ConsumerStatefulWidget {
@@ -39,15 +43,45 @@ class _ContactsScreenState extends ConsumerState<ContactsScreen> {
   Future<void> _showAddContactDialog(BuildContext context) async {
     final nameController = TextEditingController();
     final phoneController = TextEditingController();
+    String? avatarPath; // 选中的头像（复制到 avatars/ 后的路径）。
     bool didAdd = false;
 
     final result = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Add Contact'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Add Contact'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 头像选择（点击选图，无头像显示占位）。
+              InkWell(
+                onTap: () async {
+                  final picked = await ImagePicker()
+                      .pickImage(source: ImageSource.gallery);
+                  if (picked == null) return;
+                  // 复制到 app 私有目录 avatars/，避免原图被系统清理。
+                  final dir = await getApplicationDocumentsDirectory();
+                  final avatarsDir = '${dir.path}/avatars';
+                  await Directory(avatarsDir).create(recursive: true);
+                  final dest =
+                      '$avatarsDir/${DateTime.now().millisecondsSinceEpoch}.jpg';
+                  await File(picked.path).copy(dest);
+                  if (ctx.mounted) {
+                    setDialogState(() => avatarPath = dest);
+                  }
+                },
+                child: avatarPath != null
+                    ? CircleAvatar(
+                        radius: 32,
+                        backgroundImage: FileImage(File(avatarPath!)),
+                      )
+                    : CircleAvatar(
+                        radius: 32,
+                        child: const Icon(Icons.person, size: 32),
+                      ),
+              ),
+            const SizedBox(height: 12),
             TextField(
               controller: nameController,
               decoration: const InputDecoration(
@@ -78,7 +112,11 @@ class _ContactsScreenState extends ConsumerState<ContactsScreen> {
               if (name.isEmpty || phone.isEmpty) return;
               try {
                 final mgr = ContactManager(ApiClient());
-                await mgr.addContact(displayName: name, phoneNumber: phone);
+                await mgr.addContact(
+                  displayName: name,
+                  phoneNumber: phone,
+                  avatarPath: avatarPath,
+                );
                 didAdd = true;
                 if (ctx.mounted) Navigator.pop(ctx, true);
               } catch (e) {
@@ -92,7 +130,8 @@ class _ContactsScreenState extends ConsumerState<ContactsScreen> {
             child: const Text('Add'),
           ),
         ],
-      ),
+          ),
+        ),
     );
 
     if (result != true || !didAdd) return;
@@ -131,7 +170,10 @@ class _ContactsScreenState extends ConsumerState<ContactsScreen> {
                       final contact = _contacts[index];
                       final isOnline = presence[contact.id] ?? false;
                       return ListTile(
-                        leading: CircleAvatar(child: Text(contact.initials)),
+                        leading: ContactAvatar(
+                          avatarPath: contact.avatarPath,
+                          initials: contact.initials,
+                        ),
                         title: Text(contact.displayName),
                         subtitle: contact.isRegistered
                             ? Text(
