@@ -44,6 +44,7 @@ class ContactManager {
     required String displayName,
     required String phoneNumber,
     String? publicKeyFingerprint,
+    String? avatarPath,
   }) async {
     final phoneHash = CryptoManager.sha256Hash(phoneNumber, salt: _phoneSalt);
     // Try to resolve the user UUID from the server.
@@ -63,6 +64,7 @@ class ContactManager {
       'display_name': displayName,
       'phone_hash': phoneHash,
       'public_key_fingerprint': publicKeyFingerprint,
+      if (avatarPath != null) 'avatar_path': avatarPath,
       'is_registered': isRegistered ? 1 : 0,
     });
   }

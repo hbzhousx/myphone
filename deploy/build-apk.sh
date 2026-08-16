@@ -45,6 +45,7 @@ cd "$SCRIPT_DIR/../apps/mobile"
 # 优先离线解析（依赖已在 pub 缓存，避免联网获取安全通告因网络抖动失败）
 flutter pub get --offline || flutter pub get
 flutter build apk --release \
+    --target-platform android-arm64 \
     --dart-define=MYPHONE_SERVER_HOST="$MYPHONE_SERVER_HOST" \
     --dart-define=MYPHONE_SERVER_PORT="$MYPHONE_SERVER_PORT" \
     --dart-define=MYPHONE_SERVER_TLS="$MYPHONE_SERVER_TLS" \

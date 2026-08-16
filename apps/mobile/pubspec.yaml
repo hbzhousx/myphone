@@ -1,7 +1,7 @@
 name: myphone
 description: Encrypted calling app with low-bandwidth support.
 publish_to: 'none'
-version: 1.2.1+87
+version: 1.2.1+102
 
 environment:
   sdk: '>=3.2.0 <4.0.0'
@@ -38,6 +38,10 @@ dependencies:
   file_picker: ^8.0.7
   image_picker: ^1.1.2
   mime: ^2.0.0
+  geolocator: ^10.1.0
+  url_launcher: ^6.3.0
+  flutter_map: ^6.2.1
+  latlong2: ^0.9.1
 
 dev_dependencies:
   flutter_test:
