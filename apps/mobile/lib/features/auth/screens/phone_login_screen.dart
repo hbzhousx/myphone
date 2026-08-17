@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../app/auth_guard.dart';
+import '../../../core/crypto/chat_session_manager.dart';
 import '../../../core/network/api_client.dart';
+import '../../../core/storage/database.dart';
 
 class PhoneLoginScreen extends ConsumerStatefulWidget {
   final String? prefillPhone;
@@ -56,6 +58,19 @@ class _PhoneLoginScreenState extends ConsumerState<PhoneLoginScreen> {
       // sync with the current account so the prefill matches on next unlock.
       if (await AuthGuard.isBiometricEnabled()) {
         await AuthGuard.setBiometricEnabled(true, phone: phone);
+      }
+      // ★关键修复：登录后立即发布身份密钥 + prekey bundle。
+      //   之前只在进入会话列表页(ChatStateNotifier._init)时才触发，若用户登录后
+      //   停留在拨号页不进入会话，服务器上就永远没有该用户的 identity/prekey →
+      //   后台显示 prekey=0，且通话 X3DH 因身份公钥缺失而接不通。
+      //   这里在登录成功后主动发布，保证新开户/重装后登录即完成密钥初始化。
+      try {
+        final db = DatabaseManager.instance;
+        await ChatSessionManager(db: db, api: ApiClient())
+            .publishPrekeyBundle();
+      } catch (e) {
+        debugPrint('[LOGIN] publishPrekeyBundle failed: $e');
+        // 发布失败不阻塞登录；进入主界面后 ChatState 仍会再试一次。
       }
       if (mounted) context.go('/dialer');
     } on ApiException catch (e) {
