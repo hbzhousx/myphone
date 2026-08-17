@@ -1,8 +1,11 @@
 package com.myphone.app;
 
+import android.app.NotificationManager;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
+import android.provider.Settings;
+import android.view.WindowManager;
 import androidx.core.content.FileProvider;
 
 import io.flutter.embedding.android.FlutterFragmentActivity;
@@ -25,6 +28,11 @@ public class MainActivity extends FlutterFragmentActivity {
     public void onCreate(android.os.Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         cacheIncomingExtras(getIntent());
+        // 锁屏/息屏来电：FSI 拉起本 Activity 时设置锁屏显示 + 亮屏 flag。
+        // ★严格 gated 在 EXTRA_INCOMING_JSON 上：仅来电唤醒时生效，避免拨号盘越过 keyguard。
+        if (getIntent().hasExtra(CallService.EXTRA_INCOMING_JSON)) {
+            applyIncomingCallWindowFlags();
+        }
         // 冷启动（进程被杀后全屏拉起）：app 已在最前台，
         // 必须停原生响铃 + 重发挂起来电，否则"接听后仍响铃 + 超时断线"。
         CallService.onActivityBackToTask();
@@ -35,8 +43,26 @@ public class MainActivity extends FlutterFragmentActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         cacheIncomingExtras(intent);
+        if (intent.hasExtra(CallService.EXTRA_INCOMING_JSON)) {
+            applyIncomingCallWindowFlags();
+        }
         // 上滑退出后再次进入：通知服务 app 已回前台，重发挂起来电。
         CallService.onActivityBackToTask();
+    }
+
+    /** 锁屏来电：亮屏 + 显示在 keyguard 之上（不解除锁屏）。 */
+    private void applyIncomingCallWindowFlags() {
+        try {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            if (Build.VERSION.SDK_INT >= 27) {
+                setShowWhenLocked(true);
+                setTurnScreenOn(true);
+            }
+        } catch (Exception e) {
+            // 个别 ROM 窗口 flag 异常不阻塞来电。
+        }
     }
 
     private void cacheIncomingExtras(Intent intent) {
@@ -173,6 +199,49 @@ public class MainActivity extends FlutterFragmentActivity {
                         status.put("ignoringOptimization", isIgnoringBatteryOptimizations());
                         status.put("manufacturer", manufacturer());
                         result.success(status);
+                        break;
+                    }
+                    case "getFullScreenIntentStatus": {
+                        android.app.NotificationManager nm =
+                            (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                        boolean can = Build.VERSION.SDK_INT < 34 || nm.canUseFullScreenIntent();
+                        java.util.HashMap<String, Object> r = new java.util.HashMap<>();
+                        r.put("allowed", can);
+                        r.put("isAndroid14", Build.VERSION.SDK_INT >= 34);
+                        result.success(r);
+                        break;
+                    }
+                    case "openFullScreenIntentSettings": {
+                        if (Build.VERSION.SDK_INT >= 34) {
+                            Intent i = new Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                Uri.parse("package:" + getPackageName()));
+                            startActivity(i);
+                            result.success(true);
+                        } else {
+                            result.success(false);
+                        }
+                        break;
+                    }
+                    case "openNotificationSettings": {
+                        Intent i = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                        i.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+                        startActivity(i);
+                        result.success(true);
+                        break;
+                    }
+                    case "requestIgnoreBatteryOptimization": {
+                        if (isIgnoringBatteryOptimizations()) {
+                            result.success("already");
+                            break;
+                        }
+                        try {
+                            Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:" + getPackageName()));
+                            startActivity(i);
+                            result.success("requested");
+                        } catch (Exception e) {
+                            result.error("unavailable", e.getMessage(), null);
+                        }
                         break;
                     }
                     default:

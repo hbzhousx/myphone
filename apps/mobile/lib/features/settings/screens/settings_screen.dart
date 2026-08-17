@@ -9,7 +9,10 @@ import '../../../app/auth_guard.dart';
 import '../../../core/network/service_bridge.dart';
 import '../../../core/ota/apk_installer.dart';
 import '../../../core/ota/ota_service.dart';
+import '../../../core/permission/permission_service.dart';
 import '../../auth/biometric_auth.dart';
+import '../../calls/call_state.dart';
+import '../../chat/chat_state.dart';
 import '../settings_state.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
@@ -80,13 +83,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     } catch (_) {}
   }
 
-  /// 打开系统"电池优化/忽略电池优化"设置页（各 ROM 路径见白名单引导文案）。
+  /// 加入电池白名单：先弹系统"忽略电池优化"确认框（一键授权），
+  /// 失败/已豁免则回退厂商自启动/后台管理页。返回后刷新状态。
   Future<void> _openBatteryOptimizationSettings() async {
     if (!Platform.isAndroid) return;
-    try {
-      await const MethodChannel('myphone/system')
-          .invokeMethod('openBatterySettings');
-    } catch (_) {}
+    // 第一步：请求忽略电池优化（弹系统确认框）。已豁免则直接成功。
+    final requested = await PermissionService.requestIgnoreBatteryOptimization();
+    if (!requested) {
+      // 部分 ROM 移除了该弹框 → 回退厂商自启动/后台管理页。
+      try {
+        await const MethodChannel('myphone/system')
+            .invokeMethod('openBatterySettings');
+      } catch (_) {}
+    }
+    if (mounted) setState(() {}); // 返回后刷新电池白名单状态
   }
 
   /// 检测是否已在电池白名单 + 获取厂商，返回可展示的引导文案。
@@ -120,6 +130,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     } catch (_) {
       return '点击加入电池白名单，防止息屏时被系统冻结';
     }
+  }
+
+  /// Android 14+ "全屏来电"权限状态文案。
+  Future<String> _fsiHint() async {
+    if (!Platform.isAndroid) return '';
+    final ok = await PermissionService.canUseFullScreenIntent();
+    return ok ? '全屏来电已开启 ✅' : '未开启，点击前往设置开启全屏来电';
   }
 
   Future<void> _checkUpdate() async {
@@ -255,9 +272,39 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 await ref
                     .read(settingsProvider.notifier)
                     .toggleResident();
+                if (v) {
+                  // 开启常驻前先申请通知权限（来电全屏依赖）。
+                  await PermissionService.ensureIncomingCallNotifications();
+                }
                 await ResidentService.applyEnabled(v);
+                // P1-G：切换常驻会改变传输层（ServiceBridge vs DirectWS），
+                // 重建 provider 让其重新 createSignalingClient()，避免双 WS/完全离线。
+                if (Platform.isAndroid) {
+                  ref.invalidate(callStateProvider);
+                  ref.invalidate(chatStateProvider);
+                }
               },
               secondary: const Icon(Icons.power_settings_new),
+            ),
+            ListTile(
+              leading: const Icon(Icons.fullscreen),
+              title: const Text('全屏来电（Android 14+）'),
+              subtitle: FutureBuilder<String>(
+                future: _fsiHint(),
+                builder: (context, snapshot) => Text(
+                  snapshot.data ?? '检测中...',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: (snapshot.data?.contains('✅') ?? false)
+                        ? Colors.green
+                        : Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              onTap: () async {
+                await PermissionService.openFullScreenIntentSettings();
+                if (mounted) setState(() {});
+              },
             ),
             ListTile(
               leading: const Icon(Icons.battery_saver),

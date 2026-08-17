@@ -96,6 +96,9 @@ class _MyPhoneAppState extends ConsumerState<MyPhoneApp> with WidgetsBindingObse
   }
 
   Future<void> _initResidentBridge() async {
+    // P1-H：resume 自愈——服务被 OEM 杀后重拉（ensureStarted 幂等）。
+    //   若在冷启动后用户立即回前台，此时服务可能已死但 WS 没恢复在线。
+    await ResidentService.ensureStarted();
     // 回前台/冷启动：通知服务 app 已存活，读取挂起来电注入。
     await ResidentService.notifyForegrounded();
     await ResidentService.injectPendingIncoming();

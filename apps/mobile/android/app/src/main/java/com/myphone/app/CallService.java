@@ -19,6 +19,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.util.Log;
@@ -87,9 +88,9 @@ public class CallService extends Service {
 
     /** 来电全屏后，Flutter 未接管则响铃 X ms 自动挂断并回 busy。 */
     private static final long INCOMING_RING_TIMEOUT_MS = 30_000;
-    /** Flutter 心跳间隔；超过 3 个周期未到则视为 app 进程已死。 */
+    /** Flutter 心跳间隔；超过 1.5 个周期未到则视为 app 进程已死/被冻结。 */
     private static final long APP_HEARTBEAT_INTERVAL_MS = 10_000;
-    private static final long APP_DEAD_AFTER_MS = 30_000;
+    private static final long APP_DEAD_AFTER_MS = 15_000;
 
     private static final String PING = "{\"type\":\"ping\"}";
     private static final long PING_INTERVAL_MS = 15_000;
@@ -102,6 +103,9 @@ public class CallService extends Service {
     private static CallService instance;
     /** Flutter 侧 EventChannel 的 sink；app 被杀时可能为 null。 */
     private static volatile EventChannel.EventSink eventSink;
+
+    /** 来电期间短暂 CPU 唤醒锁：响铃/全屏处理期间防止系统休眠中断。 */
+    private PowerManager.WakeLock incomingWakeLock;
 
     private final OkHttpClient client = new OkHttpClient.Builder()
         // OkHttp 自动应答服务端 ping；15s 客户端心跳见 pingTask。
@@ -517,18 +521,52 @@ public class CallService extends Service {
         // 已在本服务响铃的同款来电：忽略（EventChannel 已透传，Flutter 负责去重）。
         if (incomingRingActive && callId.equals(ringCallId)) return;
 
-        if (appActive) {
-            // Flutter 前台已接管（EventChannel 已把 offer 推给它），无需原生 UI。
-            Log.d(TAG, "offer (app active) call=" + callId + " -> flutter path");
+        // ★P0-D 修复：Flutter 必须"真正活着"才走 Flutter path。
+        //   appActive 可能残留 true（OEM 冻结 isolate 但进程/服务存活），此时
+        //   EventChannel 无接收方，offer 会被静默吞掉。改为三条件：
+        //   appActive && eventSink!=null && 心跳新鲜 才信任 Flutter。
+        boolean flutterAlive = eventSink != null
+            && (System.currentTimeMillis() - lastAppActiveTs) <= APP_DEAD_AFTER_MS;
+        if (appActive && flutterAlive) {
+            // Flutter 前台/后台存活已接管（EventChannel 已把 offer 推给它），无需原生 UI。
+            Log.d(TAG, "offer (flutter alive) call=" + callId + " -> flutter path");
             return;
         }
-        Log.d(TAG, "offer (app inactive) call=" + callId + " -> native ring+fullscreen");
+        Log.d(TAG, "offer (app inactive) call=" + callId
+            + " appActive=" + appActive + " sink=" + (eventSink != null)
+            + " -> native ring+fullscreen");
 
         // 后台/被杀：原生响铃 + 全屏 + 存 offer 供冷启动注入。
         startIncomingRing(callId, from, to);
         pendingOffer = msg.toString();
         postFullScreenIncoming(callId);
         scheduleRingTimeout();
+    }
+
+    /** 来电期间获取短暂 CPU 唤醒锁（与响铃超时对齐，超时自动释放防泄漏）。 */
+    private void acquireIncomingWakeLock() {
+        try {
+            if (incomingWakeLock == null) {
+                PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                incomingWakeLock = pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK, "myphone:incoming");
+                incomingWakeLock.setReferenceCounted(false);
+            }
+            if (!incomingWakeLock.isHeld()) {
+                incomingWakeLock.acquire(INCOMING_RING_TIMEOUT_MS);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "wake lock acquire failed: " + e);
+        }
+    }
+
+    private void releaseIncomingWakeLock() {
+        try {
+            if (incomingWakeLock != null && incomingWakeLock.isHeld()) {
+                incomingWakeLock.release();
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     private void startIncomingRing(String callId, String from, String to) {
@@ -561,6 +599,8 @@ public class CallService extends Service {
         } catch (Exception e) {
             Log.w(TAG, "vibrate failed: " + e);
         }
+        // 来电期间保 CPU 活跃（响铃 + FSI 处理），超时自动释放。
+        acquireIncomingWakeLock();
     }
 
     /** 后台/被杀时发送 busy（响铃超时或 Flutter 接管前 app 被拉起来又拒了）。 */
@@ -602,6 +642,7 @@ public class CallService extends Service {
         stopVibration();
         NotificationManager nm = getSystemService(NotificationManager.class);
         nm.cancel(NOTIF_ID_INCOMING);
+        releaseIncomingWakeLock();
     }
 
     private void stopVibration() {
@@ -618,6 +659,18 @@ public class CallService extends Service {
     }
 
     private void postFullScreenIncoming(String callId) {
+        // P0-A：Android 14+ 若 FSI 未授权，setFullScreenIntent 静默降级为横幅通知，
+        // 不会拉起 Activity/锁屏全屏。打日志便于排障（配合设置页引导）。
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                NotificationManager nm = getSystemService(NotificationManager.class);
+                if (nm != null && !nm.canUseFullScreenIntent()) {
+                    Log.w(TAG, "full-screen intent DISABLED by user; will fall back to heads-up");
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "fsi check failed: " + e);
+        }
         Intent fullScreen = new Intent(this, MainActivity.class);
         fullScreen.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         fullScreen.putExtra(EXTRA_INCOMING_CALL_ID, callId);

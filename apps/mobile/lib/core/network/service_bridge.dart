@@ -35,6 +35,14 @@ SignalingClient createSignalingClient() {
 
 SignalingClient? _signalingSingleton;
 
+/// 释放当前单例并清空缓存，下次 createSignalingClient() 按新常驻模式重建。
+/// ★P1-G：运行时切换常驻必须调用，否则旧传输层单例（ServiceBridge/DirectWS）
+///   残留 → 双 WS 互踢或完全离线。
+void resetSignalingClient() {
+  _signalingSingleton?.dispose();
+  _signalingSingleton = null;
+}
+
 /// 常驻服务生命周期（登录成功 / 进入拨号盘时调用，幂等）。
 class ResidentService {
   static const MethodChannel _channel = MethodChannel('myphone/service');
@@ -44,6 +52,7 @@ class ResidentService {
 
   /// 应用常驻开关：关闭时停止服务；打开时拉起服务。
   static Future<void> applyEnabled(bool value) async {
+    if (value == enabled) return; // 无变化不动作
     enabled = value;
     if (!Platform.isAndroid) return;
     if (value) {
@@ -51,6 +60,8 @@ class ResidentService {
     } else {
       await logout();
     }
+    // 传输层已变化（ServiceBridge ↔ DirectWS），清掉旧单例。
+    resetSignalingClient();
   }
 
   /// 拉起前台服务并注入 token + 服务器配置。若未登录或已启动则无副作用。
