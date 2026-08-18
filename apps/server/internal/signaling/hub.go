@@ -46,6 +46,12 @@ const (
 	chatSeenKey      = "chat:seen:%s"
 )
 
+// AgentBridge 转发 AI 会话信令（agentInit/agentSignal/agentHangup）到媒体端点。
+// 由 internal/agent.Bridge 实现；未挂载（nil）时 routeAgentSignal drop+日志。
+type AgentBridge interface {
+	SendToAgent(fromID, botID string, raw []byte)
+}
+
 type Hub struct {
 	clients    map[string]*Client
 	register   chan *Client
@@ -55,12 +61,22 @@ type Hub struct {
 	// Redis 客户端（可为 nil：聊天离线消息退化为「离线即丢弃」，不影响通话中继）。
 	redis *redis.Client
 
+	// agentBridge 媒体端点桥（v1.50 AI 通话）；nil 时 AI 会话信令 drop+日志。
+	agentBridge AgentBridge
+
 	TotalMessages  int64
 	CallsActive    int
 	CallsCompleted int64
 	StartTime      time.Time
 	ActiveCallIDs  map[string]bool
 	callMu         sync.Mutex
+}
+
+// SetAgentBridge 挂载媒体端点桥（main 构造 agent.NewBridge 后调用）。
+func (h *Hub) SetAgentBridge(b AgentBridge) {
+	h.mu.Lock()
+	h.agentBridge = b
+	h.mu.Unlock()
 }
 
 func NewHub(redisClient *redis.Client) *Hub {
@@ -122,6 +138,11 @@ func (h *Hub) _sendToUser(userID string, message []byte) {
 }
 
 func sendToUser(hub *Hub, userID string, message []byte) {
+	hub._sendToUser(userID, message)
+}
+
+// SendToUser 向指定用户推送一条信令（跨包使用：agent 桥接包回推用户）。
+func SendToUser(hub *Hub, userID string, message []byte) {
 	hub._sendToUser(userID, message)
 }
 
@@ -240,6 +261,12 @@ func (c *Client) readPump() {
 		}
 
 		if toID, ok := toUserID.(string); ok && toID != "" {
+			// AI 会话信令（agentInit/agentSignal/agentHangup）→ 媒体端点桥。
+			if s, ok := typ.(string); ok && isAgentSignalType(s) && strings.HasPrefix(toID, "bot-") {
+				fromID, _ := fromUserID.(string)
+				c.hub.routeAgentSignal(fromID, toID, message)
+				continue
+			}
 			// 聊天消息：目标离线时进 Redis 短期队列，目标在线则按通话路径直转。
 			if s, ok := typ.(string); ok && s == "chatMessage" {
 				fromID, _ := fromUserID.(string)
@@ -249,6 +276,24 @@ func (c *Client) readPump() {
 			sendToUser(c.hub, toID, message)
 		}
 	}
+}
+
+// isAgentSignalType 判断是否为 AI 会话 c2a 信令（客户端 → bot → 媒体端点）。
+func isAgentSignalType(t string) bool {
+	switch t {
+	case "agentInit", "agentSignal", "agentHangup":
+		return true
+	}
+	return false
+}
+
+// routeAgentSignal 把 AI 会话信令交给媒体端点桥；桥未配置时 drop+日志。
+func (h *Hub) routeAgentSignal(fromID, botID string, message []byte) {
+	if h.agentBridge == nil {
+		log.Printf("[AGENT-BRIDGE] drop agent signal from=%s to=%s: bridge not configured", fromID, botID)
+		return
+	}
+	h.agentBridge.SendToAgent(fromID, botID, message)
 }
 
 // handleChatMessage 处理聊天消息中继。目标在线 → 直转；离线 → 入 Redis 队列（24h TTL）。

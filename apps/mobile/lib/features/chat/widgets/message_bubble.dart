@@ -2,6 +2,7 @@
 /// 图片/文件消息展示缩略图/卡片，点击回调 [onAttachmentTap]。
 library;
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -32,6 +33,9 @@ class MessageBubble extends StatelessWidget {
   final double? latitude;
   final double? longitude;
 
+  /// AI 动作卡片载荷（kind=action）：媒体端点下发的动作 JSON 字符串。
+  final String? agentPayload;
+
   const MessageBubble({
     super.key,
     required this.text,
@@ -45,6 +49,7 @@ class MessageBubble extends StatelessWidget {
     this.onLongPress,
     this.latitude,
     this.longitude,
+    this.agentPayload,
   });
 
   bool get _isAttachment =>
@@ -52,7 +57,8 @@ class MessageBubble extends StatelessWidget {
       kind == 'video' ||
       kind == 'file' ||
       kind == 'location' ||
-      kind == 'transfer';
+      kind == 'transfer' ||
+      kind == 'action';
 
   /// 位置消息点击 → 调地图 App 查看（国内地图 App 用 GCJ-02/BD-09，
   ///   geo: 传 WGS-84 会被误解 → 偏移）。按高德/百度 URI + 显式坐标类型。
@@ -166,7 +172,10 @@ class MessageBubble extends StatelessWidget {
     final canPreview = path != null && File(path).existsSync();
 
     Widget content;
-    if (kind == 'location') {
+    if (kind == 'action') {
+      // AI 动作卡片（v1.50）：居中卡片，解析 agent_payload JSON。
+      content = _buildActionCard(scheme);
+    } else if (kind == 'location') {
       // 位置消息卡片：图标 + 地址/坐标，点击调系统地图。
       content = Container(
         width: 200,
@@ -288,6 +297,58 @@ class MessageBubble extends StatelessWidget {
           if (isOutgoing && status != null) ...[
             const SizedBox(height: 2),
             _DeliveryTick(status: status!, textColor: textColor),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// AI 动作卡片：解析 agent_payload（{title, status, detail, icon?}），
+  /// 居中、非气泡、按 status 着色。解析失败降级为普通文本气泡。
+  Widget _buildActionCard(ColorScheme scheme) {
+    Map<String, dynamic> payload = const {};
+    if (agentPayload != null) {
+      try {
+        final decoded = jsonDecode(agentPayload!) as Map<String, dynamic>;
+        payload = decoded;
+      } catch (_) {}
+    }
+    final title = payload['title'] as String? ?? _displayText;
+    final detail = payload['detail'] as String? ?? '';
+    final status = payload['status'] as String? ?? 'done';
+    final (icon, color) = switch (status) {
+      'running' => (Icons.sync, Colors.orangeAccent),
+      'failed' => (Icons.error_outline, Colors.redAccent),
+      _ => (Icons.check_circle_outline, Colors.greenAccent),
+    };
+    return Container(
+      width: 240,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withOpacity(0.5),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: color, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          if (detail.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(detail, style: TextStyle(fontSize: 12, color: scheme.outline)),
           ],
         ],
       ),

@@ -11,6 +11,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/myphone/server/internal/admin"
+	"github.com/myphone/server/internal/agent"
 	"github.com/myphone/server/internal/api"
 	"github.com/myphone/server/internal/discovery"
 	"github.com/myphone/server/internal/models"
@@ -40,6 +41,15 @@ func main() {
 
 	hub := signaling.NewHub(redisClient)
 	go hub.Run()
+
+	// v1.50 AI 通话：媒体端点出站桥（URL 为空时 Run 直接返回，全链路降级）。
+	agentBridge := agent.NewBridge(
+		hub,
+		os.Getenv("AGENT_MEDIA_WS_URL"),
+		os.Getenv("AGENT_BRIDGE_TOKEN"),
+	)
+	hub.SetAgentBridge(agentBridge)
+	go agentBridge.Run()
 
 	authHandler := api.NewAuthHandler(db, redisClient)
 	keysHandler := api.NewKeysHandler(db)

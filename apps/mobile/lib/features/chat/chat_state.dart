@@ -161,6 +161,14 @@ class ChatStateNotifier extends StateNotifier<ChatState> {
       case ChatSignalType.chatFileIce:
       case ChatSignalType.chatFileDone:
         break;
+      // v1.50 AI 会话信令（agentInit/agentSignal/agentHangup/agentReady/agentTranscript）
+      // 由 agentCallStateProvider 单独消费，不进入聊天会话路由。
+      case ChatSignalType.agentInit:
+      case ChatSignalType.agentSignal:
+      case ChatSignalType.agentHangup:
+      case ChatSignalType.agentReady:
+      case ChatSignalType.agentTranscript:
+        break;
     }
   }
 

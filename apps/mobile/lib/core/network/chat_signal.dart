@@ -14,6 +14,18 @@ enum ChatSignalType {
   chatFileDone,
   chatDiag,
   chatAttachment,
+
+  // ---- v1.50 AI 语音通话（哪吒/智能体）----
+  // agentInit: 客户端→bot，{session_id}
+  // agentSignal: 双向，{session_id, signal:{type,sdp,candidate,...}} SDP/ICE 中继
+  // agentHangup: 双向，{session_id}
+  // agentReady: bot→客户端，{state:'connected'|'listening'|'speaking'|'ended', reason?}
+  // agentTranscript: bot→客户端，字幕 {seq, who:'user'|'agent', text, is_final}
+  agentInit,
+  agentSignal,
+  agentHangup,
+  agentReady,
+  agentTranscript,
 }
 
 class ChatSignal {

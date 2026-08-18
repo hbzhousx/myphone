@@ -51,3 +51,41 @@ func TestIsOnline(t *testing.T) {
 		t.Fatalf("ghost user should be offline")
 	}
 }
+
+// mockBridge 记录转发参数的假 AgentBridge。
+type mockBridge struct{ send func(from, bot string, raw []byte) }
+
+func (m mockBridge) SendToAgent(from, bot string, raw []byte) { m.send(from, bot, raw) }
+
+// TestAgentBridgeRouting 验证 AI 会话信令路由到媒体端点桥；未挂桥 drop 不 panic。
+func TestAgentBridgeRouting(t *testing.T) {
+	h := NewHub(nil)
+	h.routeAgentSignal("alice", "bot-luozha", []byte(`{"type":"agentInit"}`)) // 未挂桥不 panic
+
+	var gotFrom, gotBot string
+	var gotRaw []byte
+	h.SetAgentBridge(mockBridge{send: func(from, bot string, raw []byte) {
+		gotFrom, gotBot, gotRaw = from, bot, raw
+	}})
+	h.routeAgentSignal("alice", "bot-luozha", []byte(`{"type":"agentInit","payload":{}}`))
+	if gotFrom != "alice" || gotBot != "bot-luozha" {
+		t.Fatalf("unexpected routing: from=%q bot=%q", gotFrom, gotBot)
+	}
+	if gotRaw == nil || len(gotRaw) == 0 {
+		t.Fatalf("expected raw message forwarded")
+	}
+}
+
+// TestIsAgentSignalType 验证 c2a 类型判定（agentReady/agentTranscript 为 a2c 不路由）。
+func TestIsAgentSignalType(t *testing.T) {
+	for _, typ := range []string{"agentInit", "agentSignal", "agentHangup"} {
+		if !isAgentSignalType(typ) {
+			t.Fatalf("expected %s to be an agent signal type", typ)
+		}
+	}
+	for _, typ := range []string{"chatMessage", "agentReady", "agentTranscript"} {
+		if isAgentSignalType(typ) {
+			t.Fatalf("expected %s NOT to be an agent signal type", typ)
+		}
+	}
+}

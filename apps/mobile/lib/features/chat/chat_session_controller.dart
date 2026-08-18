@@ -402,6 +402,9 @@ class ChatSessionController {
         'expires_in_seconds': expiresIn,
         'received_at': now,
         'created_at': now,
+        // v1.50 AI 动作卡片：媒体端点明文消息可带 agent_payload（动作 JSON）。
+        if (parsed['agent_payload'] != null)
+          'agent_payload': jsonEncode(parsed['agent_payload']),
       });
       await _touchConversation(body, messageId);
       _sendReceipt(messageId, 'delivered');

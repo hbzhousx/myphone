@@ -11,7 +11,7 @@ import 'key_manager.dart';
 
 class DatabaseManager {
   static const _databaseName = 'myphone.db';
-  static const _schemaVersion = 8;
+  static const _schemaVersion = 9;
   static const _plaintextBackupSuffix = '.plaintext-migration';
   static DatabaseManager? _instance;
   sqlcipher.Database? _db;
@@ -117,7 +117,7 @@ class DatabaseManager {
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL REFERENCES conversations(id),
         direction TEXT NOT NULL CHECK(direction IN ('outgoing','incoming')),
-        kind TEXT NOT NULL CHECK(kind IN ('text','emoji','image','video','file','location','transfer')),
+        kind TEXT NOT NULL CHECK(kind IN ('text','emoji','image','video','file','location','transfer','agent','action')),
         body TEXT,
         ciphertext BLOB,
         status TEXT CHECK(status IN ('sending','pending','sent','delivered','read','failed')),
@@ -129,6 +129,7 @@ class DatabaseManager {
         latitude REAL,
         longitude REAL,
         amount REAL,
+        agent_payload TEXT,
         created_at INTEGER NOT NULL)
     ''');
     await db.execute('''
@@ -271,6 +272,44 @@ class DatabaseManager {
       ''');
       await db.execute('DROP TABLE messages');
       await db.execute('ALTER TABLE messages_v8 RENAME TO messages');
+      await db.execute('PRAGMA foreign_keys = ON');
+    }
+    if (oldVersion < 9) {
+      // v9: messages.kind 加 'agent','action'（AI 通话文本/动作卡片回流）+ agent_payload 列。
+      //    SQLite 改 CHECK 必须重建表（复制数据→drop→重建→回填），与 v7/v8 同模式。
+      await db.execute('PRAGMA foreign_keys = OFF');
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS messages_v9 (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id),
+          direction TEXT NOT NULL CHECK(direction IN ('outgoing','incoming')),
+          kind TEXT NOT NULL CHECK(kind IN ('text','emoji','image','video','file','location','transfer','agent','action')),
+          body TEXT,
+          ciphertext BLOB,
+          status TEXT CHECK(status IN ('sending','pending','sent','delivered','read','failed')),
+          expires_in_seconds INTEGER DEFAULT 0,
+          expires_at INTEGER,
+          read_at INTEGER,
+          sent_at INTEGER, received_at INTEGER,
+          transfer_id TEXT,
+          latitude REAL,
+          longitude REAL,
+          amount REAL,
+          agent_payload TEXT,
+          created_at INTEGER NOT NULL)
+      ''');
+      await db.execute('''
+        INSERT INTO messages_v9
+          (id, conversation_id, direction, kind, body, ciphertext, status,
+           expires_in_seconds, expires_at, read_at, sent_at, received_at,
+           transfer_id, latitude, longitude, amount, created_at)
+        SELECT id, conversation_id, direction, kind, body, ciphertext, status,
+           expires_in_seconds, expires_at, read_at, sent_at, received_at,
+           transfer_id, latitude, longitude, amount, created_at
+        FROM messages
+      ''');
+      await db.execute('DROP TABLE messages');
+      await db.execute('ALTER TABLE messages_v9 RENAME TO messages');
       await db.execute('PRAGMA foreign_keys = ON');
     }
   }

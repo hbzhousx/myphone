@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mime/mime.dart';
 import 'package:path/path.dart' as p;
@@ -46,6 +47,8 @@ enum _AttachSource { gallery, camera, file, location, transfer }
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final _inputController = TextEditingController();
+  /// 输入框是否有内容（决定最右按钮显示「发送」还是「附件」）。
+  bool _hasText = false;
   List<Map<String, dynamic>> _messages = [];
   bool _loading = true;
   String _displayName = '';
@@ -61,6 +64,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _inputController.addListener(_onInputChanged);
     ref.read(chatStateProvider.notifier).setActiveConversation(_conversationId);
     // 首次进入聊天页引导授权（相机/存储/通知），避免发图时临时弹窗。
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -77,9 +81,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _inputController.removeListener(_onInputChanged);
     _inputController.dispose();
     ref.read(chatStateProvider.notifier).setActiveConversation(null);
     super.dispose();
+  }
+
+  /// 输入框内容变化 → 更新最右按钮状态（发送/附件）。
+  void _onInputChanged() {
+    final has = _inputController.text.trim().isNotEmpty;
+    if (has != _hasText) setState(() => _hasText = has);
+  }
+
+  /// 电话按钮：普通联系人走现有通话；机器人走 AI 语音会话。
+  void _onPhonePressed() {
+    if (widget.contactId.startsWith('bot-')) {
+      context.go('/agent-call/${widget.contactId}');
+    } else {
+      context.go('/call/${widget.contactId}');
+    }
   }
 
   /// 联系人 id → 展示名 + 头像（联系人表匹配失败则回退为原始 id）。
@@ -862,6 +882,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                             attachmentPath: msg['_attachment_path'] as String?,
                             latitude: (msg['latitude'] as num?)?.toDouble(),
                             longitude: (msg['longitude'] as num?)?.toDouble(),
+                            agentPayload: msg['agent_payload'] as String?,
                             onAttachmentTap: transferId != null
                                 ? () => _openAttachment(transferId)
                                 : null,
@@ -878,8 +899,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.emoji_emotions_outlined),
-                    onPressed: _insertEmoji,
+                    icon: const Icon(Icons.phone),
+                    onPressed: _onPhonePressed,
                   ),
                   Expanded(
                     child: TextField(
@@ -900,12 +921,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.attach_file),
-                    onPressed: _pickAndSendFile,
+                    icon: const Icon(Icons.emoji_emotions_outlined),
+                    onPressed: _insertEmoji,
                   ),
+                  // 有输入内容时是「发送」，否则是「附件」。
                   IconButton(
-                    icon: Icon(Icons.send, color: scheme.primary),
-                    onPressed: _sendText,
+                    icon: Icon(_hasText ? Icons.send : Icons.attach_file,
+                        color: _hasText ? scheme.primary : null),
+                    onPressed: _hasText ? _sendText : _pickAndSendFile,
                   ),
                 ],
               ),

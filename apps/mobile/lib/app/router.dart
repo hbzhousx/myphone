@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../features/auth/screens/login_screen.dart';
 import '../features/auth/screens/phone_login_screen.dart';
+import '../features/calls/screens/agent_call_screen.dart';
 import '../features/calls/screens/call_screen.dart';
 import '../features/calls/screens/dialer_screen.dart';
 import '../features/calls/screens/incoming_call_screen.dart';
@@ -77,6 +78,13 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) {
           final contactId = state.pathParameters['contactId']!;
           return CallScreen(contactId: contactId);
+        },
+      ),
+      GoRoute(
+        path: '/agent-call/:contactId',
+        builder: (context, state) {
+          final contactId = state.pathParameters['contactId']!;
+          return AgentCallScreen(contactId: contactId);
         },
       ),
       GoRoute(
