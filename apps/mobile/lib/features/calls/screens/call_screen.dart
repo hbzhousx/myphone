@@ -171,9 +171,15 @@ class _CallScreenState extends ConsumerState<CallScreen> {
     final networkTier = call.networkMonitor.currentTier;
     final e2ee = call.e2eeSnapshot;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF1A1A2E),
-      body: SafeArea(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        // 通话界面按返回键：最小化到拨号盘（通话继续，由全局通话条返回）。
+        if (!didPop) context.go('/dialer');
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFF1A1A2E),
+        body: SafeArea(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
@@ -245,6 +251,15 @@ class _CallScreenState extends ConsumerState<CallScreen> {
                         });
                       }),
                   _CircleButton(
+                      icon: Icons.chat_bubble_outline,
+                      color: Colors.white24,
+                      onTap: () {
+                        final activeCall = ref.read(callStateProvider);
+                        if (activeCall == null) return;
+                        // 切到聊天页：通话界面留在栈底，通话与计时继续。
+                        context.push('/chat/${activeCall.contactId}');
+                      }),
+                  _CircleButton(
                       icon: Icons.call_end,
                       color: Colors.red,
                       size: 72,
@@ -268,6 +283,7 @@ class _CallScreenState extends ConsumerState<CallScreen> {
             const SizedBox(height: 48),
           ],
         ),
+      ),
       ),
     );
   }

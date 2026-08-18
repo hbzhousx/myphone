@@ -16,8 +16,13 @@ import 'auth_guard.dart';
 
 final rootNavigatorKey = GlobalKey<NavigatorState>();
 
+/// 当前路由位置（path 字符串，如 '/dialer'、'/chat/xxx'、'/call/xxx'）。
+/// 由 routerProvider 监听 routerDelegate 回写，供全局浮层（通话条）判断
+/// "当前是否正在通话界面"。
+final currentLocationProvider = StateProvider<String?>((ref) => null);
+
 final routerProvider = Provider<GoRouter>((ref) {
-  return GoRouter(
+  final router = GoRouter(
     navigatorKey: rootNavigatorKey,
     initialLocation: '/login',
     redirect: (context, state) async {
@@ -89,4 +94,11 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
     ],
   );
+
+  // 导航变化时回写当前路径，供全局浮层（通话条）判断所在页面。
+  router.routerDelegate.addListener(() {
+    ref.read(currentLocationProvider.notifier).state =
+        router.routerDelegate.currentConfiguration.uri.toString();
+  });
+  return router;
 });

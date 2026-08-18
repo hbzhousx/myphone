@@ -10,6 +10,7 @@ import 'app/router.dart';
 import 'app/theme.dart';
 import 'core/network/service_bridge.dart';
 import 'features/calls/incoming_call_state.dart';
+import 'features/calls/widgets/call_active_banner.dart';
 
 Future<void> _reportDebug(String hypothesisId, String message, Map<String, Object?> data) async {
   final client = HttpClient();
@@ -145,6 +146,13 @@ class _MyPhoneAppState extends ConsumerState<MyPhoneApp> with WidgetsBindingObse
       themeMode: ThemeMode.system,
       routerConfig: router,
       debugShowCheckedModeBanner: false,
+      // 全局通话条：通话进行中且不在通话界面时悬浮于任意页面上方。
+      builder: (context, child) => Stack(
+        children: [
+          if (child != null) child,
+          const CallActiveBanner(),
+        ],
+      ),
     );
   }
 }
