@@ -34,6 +34,7 @@ if [ -z "$PUBLIC_IP" ]; then
 fi
 DB_PASSWORD="$(openssl rand -hex 16)"
 TURN_PASSWORD="$(openssl rand -hex 16)"
+BRIDGE_TOKEN="$(openssl rand -hex 24)"
 echo "==> 公网 IP: ${PUBLIC_IP:-未探测到（跳过 external-ip，可稍后手动补 /etc/turnserver.conf）}"
 echo "==> 已生成数据库密码与 TURN 密码"
 
@@ -75,6 +76,21 @@ MYPHONE_DB_PASSWORD=${DB_PASSWORD}
 MYPHONE_TURN_PASSWORD=${TURN_PASSWORD}
 MYPHONE_PUBLIC_IP=${PUBLIC_IP}
 MYPHONE_ATTACHMENT_DIR=/opt/myphone/attachments
+# ---- v1.50 AI 语音通话（媒体端点）----
+# myphone-server 出站桥 → 本地媒体端点（同机回环即可）
+AGENT_MEDIA_WS_URL=ws://127.0.0.1:8090/bridge
+AGENT_BRIDGE_TOKEN=${BRIDGE_TOKEN}
+# 媒体端点监听地址（仅本机回环，不直接暴露公网）
+AGENT_LISTEN_ADDR=127.0.0.1:8090
+# 外部 ASR/TTS/Agent（缺省留空 → 媒体端点回退本地回声，仍可全链路演示）
+# AGENT_ASR_URL=ws://asr.example.com/stream
+# AGENT_TTS_URL=https://tts.example.com/synthesize
+# AGENT_TEXT_URL=https://agent.example.com/chat
+# 媒体端点 ICE（复用 coturn；留空走默认 Google STUN）
+# AGENT_STUN_URL=stun:127.0.0.1:3478
+# AGENT_TURN_URL=turn:127.0.0.1:3478
+# AGENT_TURN_USERNAME=myphone
+# AGENT_TURN_CREDENTIAL=${TURN_PASSWORD}
 EOF
 chmod 600 /etc/myphone/myphone.env
 echo "==> 已生成 /etc/myphone/myphone.env"

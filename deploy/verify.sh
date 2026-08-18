@@ -13,12 +13,14 @@ check() {
 
 echo "== 1. 系统服务 =="
 systemctl is-active --quiet myphone;        check $? "myphone 服务"
+systemctl is-active --quiet media-agent;    check $? "media-agent 服务"
 systemctl is-active --quiet postgresql;     check $? "PostgreSQL"
 redis-cli -h 127.0.0.1 ping 2>/dev/null | grep -q PONG; check $? "Redis"
 systemctl is-active --quiet coturn;         check $? "coturn"
 
 echo "== 2. 端口与健康 =="
-[ "$(curl -s http://127.0.0.1:8080/health)" = "ok" ]; check $? "后端 /health (8080)"
+[ "$(curl -s http://127.0.0.1:8080/health)" = "ok" ];       check $? "后端 /health (8080)"
+[ "$(curl -s http://127.0.0.1:8090/health)" = "ok" ];       check $? "media-agent /health (8090)"
 [ "$(curl -s http://127.0.0.1/health)" = "ok" ];    check $? "Nginx 转发 /health (80)"
 ss -ln 2>/dev/null | grep -q ':3478';                check $? "TURN 端口 3478 监听"
 ss -ln 2>/dev/null | grep -q ':6379';                check $? "Redis 端口 6379 监听"

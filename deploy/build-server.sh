@@ -23,12 +23,16 @@ mkdir -p "$OUT_DIR"
 cd "$ROOT_DIR/apps/server"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags "-s -w" -o "$OUT_DIR/myphone-server" ./cmd/
+# v1.50 AI 语音媒体端点（Pion WebRTC，零本地 Opus 编解码，纯 Go 交叉编译）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags "-s -w" -o "$OUT_DIR/media-agent" ./cmd/media-agent/
 cd - >/dev/null
 
 echo "==> 构建完成："
-ls -lh "$OUT_DIR/myphone-server"
-file "$OUT_DIR/myphone-server"
+ls -lh "$OUT_DIR/myphone-server" "$OUT_DIR/media-agent"
+file "$OUT_DIR/myphone-server" "$OUT_DIR/media-agent"
 echo ""
 echo "==> 上传到服务器："
 echo "    ssh root@<公网IP> 'mkdir -p /opt/myphone'"
 echo "    scp $OUT_DIR/myphone-server root@<公网IP>:/opt/myphone/myphone-server"
+echo "    scp $OUT_DIR/media-agent root@<公网IP>:/opt/myphone/media-agent"

@@ -16,11 +16,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="/opt/myphone"
 BIN="$APP_DIR/myphone-server"
+AGENT_BIN="$APP_DIR/media-agent"
 ENV_FILE="/etc/myphone/myphone.env"
 ADMIN_USER="${MYPHONE_ADMIN_USER:-admin}"
 
 # ---------- 前置检查 ----------
 [ -f "$BIN" ] || { echo "错误：未找到 $BIN" >&2; echo "请先在开发机运行 build-server.sh，再 scp 到服务器：" >&2; echo "  scp deploy/artifacts/myphone-server root@<公网IP>:/opt/myphone/myphone-server" >&2; exit 1; }
+[ -f "$AGENT_BIN" ] || { echo "错误：未找到 $AGENT_BIN（media-agent）" >&2; echo "请先在开发机运行 build-server.sh，再 scp 到服务器：" >&2; echo "  scp deploy/artifacts/media-agent root@<公网IP>:/opt/myphone/media-agent" >&2; exit 1; }
 [ -f "$ENV_FILE" ] || { echo "错误：缺少 $ENV_FILE，请先运行 install-deps.sh" >&2; exit 1; }
 
 # ---------- 运行用户 ----------
@@ -39,6 +41,15 @@ systemctl enable --now myphone
 systemctl restart myphone
 sleep 1
 echo "==> myphone 服务已启动"
+
+# ---------- 安装 media-agent（v1.50 AI 语音媒体端点） ----------
+install -m 0755 "$AGENT_BIN" "$APP_DIR/media-agent"
+install -m 0644 "$SCRIPT_DIR/systemd/media-agent.service" /etc/systemd/system/media-agent.service
+systemctl daemon-reload
+systemctl enable --now media-agent
+systemctl restart media-agent
+sleep 1
+echo "==> media-agent 服务已启动"
 
 # ---------- 管理后台 Basic Auth ----------
 if [ -f /etc/nginx/.myphone-htpasswd ] && [ -z "${MYPHONE_ADMIN_PASSWORD:-}" ]; then
@@ -70,7 +81,10 @@ echo "==> Nginx 已加载 myphone 配置"
 # ---------- 结果检查 ----------
 sleep 1
 systemctl is-active --quiet myphone && echo "==> myphone: active" || { echo "!! myphone 未正常运行，查看日志：journalctl -u myphone -n 50" >&2; exit 1; }
+systemctl is-active --quiet media-agent && echo "==> media-agent: active" || { echo "!! media-agent 未正常运行，查看日志：journalctl -u media-agent -n 50" >&2; exit 1; }
 echo "==> /health: $(curl -s http://127.0.0.1/health)"
+echo "==> media-agent /health: $(curl -s http://127.0.0.1:8090/health)"
 echo ""
 echo "管理后台: http://<公网IP>/admin"
 echo "服务端日志: journalctl -u myphone -f"
+echo "媒体端点日志: journalctl -u media-agent -f"

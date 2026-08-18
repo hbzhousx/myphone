@@ -1,0 +1,26 @@
+# MyPhone AI 语音媒体端点（v1.50）systemd 单元
+# 由 deploy-server.sh 安装到 /etc/systemd/system/media-agent.service
+# 依赖 myphone.service（信令服务），通过共享 /etc/myphone/myphone.env 连接桥
+[Unit]
+Description=MyPhone AI media agent (Pion WebRTC)
+After=network.target myphone.service
+Wants=myphone.service
+
+[Service]
+Type=simple
+User=myphone
+Group=myphone
+EnvironmentFile=/etc/myphone/myphone.env
+ExecStart=/opt/myphone/media-agent
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
