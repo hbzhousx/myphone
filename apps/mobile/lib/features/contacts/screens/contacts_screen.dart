@@ -187,7 +187,11 @@ class _ContactsScreenState extends ConsumerState<ContactsScreen> {
                         trailing: contact.isRegistered
                             ? const Icon(Icons.call, color: Colors.green)
                             : const Icon(Icons.person_add, color: Colors.grey),
-                        onTap: () => context.push('/contacts/${contact.id}'),
+                        onTap: () async {
+                          await context.push('/contacts/${contact.id}');
+                          // 详情页可能删除/编辑了联系人，返回后刷新。
+                          if (mounted) _loadContacts();
+                        },
                       );
                     },
                   );

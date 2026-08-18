@@ -21,6 +21,8 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
   List<Map<String, dynamic>> _conversations = [];
   bool _loading = true;
   Timer? _pollTimer;
+  /// 正在删除的会话 id——轮询加载时过滤，避免 Dismissible 与 3s 轮询竞争。
+  final Set<String> _deletingIds = {};
 
   @override
   void initState() {
@@ -42,24 +44,24 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
 
   Future<void> _loadConversations() async {
     try {
-      // ★注入机器人罗吒助手会话（常驻会话列表，文件助手式）。
+      // ★注入机器人哪吒助手会话（常驻会话列表，文件助手式）。
+      // 内部 id 保持 bot-luozha 不变（服务器 bot 匹配 / 存量数据共用）。
       await DatabaseManager.instance.upsertConversation({
         'id': 'conv-bot-luozha',
         'remote_user_id': 'bot-luozha',
-        'remote_display_name': '罗吒',
+        'remote_display_name': '哪吒',
       });
-      // 机器人作为联系人（供发起聊天选择）。
-      final bot = await DatabaseManager.instance
-          .getContact('bot-luozha');
-      if (bot == null) {
-        await DatabaseManager.instance.upsertContact({
-          'id': 'bot-luozha',
-          'display_name': '罗吒',
-          'phone_hash': 'bot:luozha',
-          'is_registered': 0,
-        });
-      }
+      // 机器人作为联系人（供发起聊天选择）。无条件 upsert，
+      // 让已装设备上联系人表里的旧显示名也同步为「哪吒」。
+      await DatabaseManager.instance.upsertContact({
+        'id': 'bot-luozha',
+        'display_name': '哪吒',
+        'phone_hash': 'bot:luozha',
+        'is_registered': 0,
+      });
       var rows = await DatabaseManager.instance.getConversations();
+      // 过滤正在删除的会话，防止轮询把已删除的会话又加回来。
+      rows = rows.where((c) => !_deletingIds.contains(c['id'])).toList();
       rows = await _enrichDisplayNames(rows);
       if (!mounted) return;
       setState(() {
@@ -188,6 +190,46 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
         '${dt.day.toString().padLeft(2, '0')}';
   }
 
+  /// 删除聊天确认框（仅删除本地会话与消息，不影响联系人）。
+  Future<bool> _confirmDeleteDialog() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除聊天'),
+        content: const Text('将删除与该联系人的所有聊天记录，联系人保留。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    return ok ?? false;
+  }
+
+  /// Dismissible 动画结束后真实删除会话。
+  Future<void> _deleteConversation(String id) async {
+    // 必须同步移除该行并标记，否则 rebuild 时 Dismissible 仍在树中会报
+    // "dismissed Dismissible widget is still part of the tree"。
+    setState(() {
+      _deletingIds.add(id);
+      _conversations.removeWhere((c) => c['id'] == id);
+    });
+    try {
+      await DatabaseManager.instance.deleteConversation(id);
+    } catch (e) {
+      debugPrint('[CONVERSATIONS] delete failed: $e');
+    }
+    // 删除完成后解除标记（轮询已取不到该行，列表不会复活）。
+    if (mounted) setState(() => _deletingIds.remove(id));
+  }
+
   @override
   Widget build(BuildContext context) {
     // Watch 以保持聊天状态（信令/控制器）存活。
@@ -216,8 +258,10 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
                     final lastAt =
                         (conv['last_message_at'] as num?)?.toInt();
                     final remoteId = conv['remote_user_id'] as String? ?? '';
+                    // 机器人会话是系统注入（每次加载都会重建），禁止删除。
+                    final isBot = remoteId == 'bot-luozha';
 
-                    return ListTile(
+                    final tile = ListTile(
                       leading: ContactAvatar(
                         avatarPath: conv['_avatar_path'] as String?,
                         initials: _initialsOf(name),
@@ -261,6 +305,23 @@ class _ConversationsScreenState extends ConsumerState<ConversationsScreen> {
                         ],
                       ),
                       onTap: () => context.push('/chat/$remoteId'),
+                    );
+
+                    if (isBot) return tile;
+
+                    // 左滑删除整个聊天（确认后执行）。
+                    return Dismissible(
+                      key: ValueKey(conv['id']),
+                      direction: DismissDirection.endToStart,
+                      confirmDismiss: (_) => _confirmDeleteDialog(),
+                      onDismissed: (_) => _deleteConversation(conv['id']),
+                      background: Container(
+                        color: Colors.red,
+                        alignment: Alignment.centerRight,
+                        padding: const EdgeInsets.symmetric(horizontal: 20),
+                        child: const Icon(Icons.delete, color: Colors.white),
+                      ),
+                      child: tile,
                     );
                   },
                 ),

@@ -412,6 +412,25 @@ class DatabaseManager {
     );
   }
 
+  /// 编辑联系人备注名/头像（本地）。同步更新会话列表里的显示名。
+  Future<void> updateContactDetails(
+    String id, {
+    String? displayName,
+    String? avatarPath,
+  }) async {
+    final db = await database;
+    final fields = <String, Object?>{
+      'updated_at': DateTime.now().millisecondsSinceEpoch,
+    };
+    if (displayName != null) fields['display_name'] = displayName;
+    if (avatarPath != null) fields['avatar_path'] = avatarPath;
+    await db.update('contacts', fields, where: 'id = ?', whereArgs: [id]);
+    if (displayName != null) {
+      await db.update('conversations', {'remote_display_name': displayName},
+          where: 'remote_user_id = ?', whereArgs: [id]);
+    }
+  }
+
   Future<void> insertCallHistory(Map<String, dynamic> call) async {
     final db = await database;
     await db.insert('call_history', call);
@@ -625,6 +644,54 @@ class DatabaseManager {
     }
     await db.delete('messages',
         where: 'conversation_id = ?', whereArgs: [conversationId]);
+  }
+
+  /// 删除整个聊天：消息、附件行、会话行、会话密钥、磁盘解密媒体。
+  /// "删除聊天 / 删除联系人" 共用。服务端离线队列不受影响（无此 API）。
+  Future<void> deleteConversation(String conversationId) async {
+    final db = await database;
+    // 收集附件本地路径，供磁盘清理。
+    final attachRows = await db.query('message_attachments',
+        where: 'conversation_id = ?', whereArgs: [conversationId]);
+    await db.delete('message_attachments',
+        where: 'conversation_id = ?', whereArgs: [conversationId]);
+    await db.delete('messages',
+        where: 'conversation_id = ?', whereArgs: [conversationId]);
+    await db.delete('conversations',
+        where: 'id = ?', whereArgs: [conversationId]);
+    await db.delete('chat_sessions',
+        where: 'conversation_id = ?', whereArgs: [conversationId]);
+
+    // 清理磁盘上的加密/解密附件文件与会话媒体目录。
+    for (final row in attachRows) {
+      for (final key in ['local_enc_path', 'local_plain_path']) {
+        final path = row[key] as String?;
+        if (path == null) continue;
+        try {
+          final f = File(path);
+          if (await f.exists()) await f.delete();
+        } catch (_) {
+          // 文件已不存在等非致命错误，忽略。
+        }
+      }
+    }
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final mediaDir = Directory('${dir.path}/chat_media/$conversationId');
+      if (await mediaDir.exists()) await mediaDir.delete(recursive: true);
+    } catch (_) {}
+  }
+
+  /// 删除联系人（级联：其全部会话 + 通话记录）。
+  Future<void> deleteContact(String id) async {
+    final db = await database;
+    final convs = await db.query('conversations',
+        where: 'remote_user_id = ?', whereArgs: [id]);
+    for (final conv in convs) {
+      await deleteConversation(conv['id'] as String);
+    }
+    await db.delete('call_history', where: 'contact_id = ?', whereArgs: [id]);
+    await db.delete('contacts', where: 'id = ?', whereArgs: [id]);
   }
 
   Future<void> close() async {

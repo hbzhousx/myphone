@@ -69,11 +69,6 @@ class ContactManager {
     });
   }
 
-  Future<void> deleteContact(String id) async {
-    final db = await DatabaseManager.instance.database;
-    await db.delete('contacts', where: 'id = ?', whereArgs: [id]);
-  }
-
   static final _uuidRe = RegExp(r'^[0-9a-f]{32}$');
 
   /// Fetch online/offline presence for registered contacts.

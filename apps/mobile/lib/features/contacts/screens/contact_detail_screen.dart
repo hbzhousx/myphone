@@ -1,6 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import '../../../core/storage/database.dart';
 import '../../../shared/models/contact.dart';
 
@@ -20,6 +24,130 @@ class _ContactDetailScreenState extends ConsumerState<ContactDetailScreen> {
   void initState() {
     super.initState();
     _loadContact();
+  }
+
+  /// 编辑联系人：仅备注名 + 头像（手机号是身份，不可改）。
+  Future<void> _showEditDialog(Contact contact) async {
+    final nameController =
+        TextEditingController(text: contact.displayName);
+    String? avatarPath = contact.avatarPath; // 未更换则保留原头像。
+    bool didSave = false;
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Edit Contact'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 头像选择（点击选图，无头像显示占位）。
+              InkWell(
+                onTap: () async {
+                  final picked = await ImagePicker()
+                      .pickImage(source: ImageSource.gallery);
+                  if (picked == null) return;
+                  final dir = await getApplicationDocumentsDirectory();
+                  final avatarsDir = '${dir.path}/avatars';
+                  await Directory(avatarsDir).create(recursive: true);
+                  final dest =
+                      '$avatarsDir/${DateTime.now().millisecondsSinceEpoch}.jpg';
+                  await File(picked.path).copy(dest);
+                  if (ctx.mounted) {
+                    setDialogState(() => avatarPath = dest);
+                  }
+                },
+                child: avatarPath != null
+                    ? CircleAvatar(
+                        radius: 32,
+                        backgroundImage: FileImage(File(avatarPath!)),
+                      )
+                    : const CircleAvatar(
+                        radius: 32, child: Icon(Icons.person, size: 32)),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Name',
+                  prefixIcon: Icon(Icons.person),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () async {
+                final name = nameController.text.trim();
+                if (name.isEmpty) return;
+                try {
+                  await DatabaseManager.instance.updateContactDetails(
+                    contact.id,
+                    displayName: name,
+                    avatarPath: avatarPath,
+                  );
+                  didSave = true;
+                  if (ctx.mounted) Navigator.pop(ctx, true);
+                } catch (e) {
+                  if (ctx.mounted) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      SnackBar(content: Text('Failed: $e')),
+                    );
+                  }
+                }
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != true || !didSave) return;
+    // 等对话框关闭动画完全结束后再刷新/dispose，避免触碰已销毁的 controller。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      nameController.dispose();
+      if (mounted) _loadContact();
+    });
+  }
+
+  /// 删除联系人（级联删除其通话记录与整个聊天），确认后返回列表。
+  Future<void> _confirmDelete(Contact contact) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Contact'),
+        content: const Text(
+            'This will also delete the call history and the entire chat '
+            'with this contact.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await DatabaseManager.instance.deleteContact(contact.id);
+      if (mounted) context.pop();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed: $e')),
+        );
+      }
+    }
   }
 
   Future<void> _loadContact() async {
@@ -50,7 +178,22 @@ class _ContactDetailScreenState extends ConsumerState<ContactDetailScreen> {
     final contact = _contact!;
 
     return Scaffold(
-      appBar: AppBar(title: Text(contact.displayName)),
+      appBar: AppBar(
+        title: Text(contact.displayName),
+        // 机器人是系统注入的（每次加载会话列表都会重建），不提供编辑/删除。
+        actions: contact.id == 'bot-luozha'
+            ? null
+            : [
+                IconButton(
+                  icon: const Icon(Icons.edit_outlined),
+                  onPressed: () => _showEditDialog(contact),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () => _confirmDelete(contact),
+                ),
+              ],
+      ),
       body: Column(
         children: [
           const SizedBox(height: 32),
