@@ -58,7 +58,7 @@ class ChatSessionController {
   }) async {
     debugPrint('[SEND] sendText begin body=$body expires=$expiresInSeconds');
     await _ensureConversation();
-    // ★机器人（罗吒）消息：明文旁路（不 E2EE X3DH）。机器人是服务器转发的
+    // ★机器人（哪吒）消息：明文旁路（不 E2EE X3DH）。机器人是服务器转发的
     //   智能体助手，消息内容为日常任务（非机密），需服务器见明文才能转发智能体。
     if (_remoteUserId.startsWith('bot-')) {
       return _sendBotText(body, expiresInSeconds: expiresInSeconds);
@@ -164,7 +164,7 @@ class ChatSessionController {
     return {'message_id': messageId};
   }
 
-  /// 机器人（罗吒）明文发送：不 X3DH，直接把明文 JSON base64 放 ciphertext，
+  /// 机器人（哪吒）明文发送：不 X3DH，直接把明文 JSON base64 放 ciphertext，
   /// 服务器解析转发智能体。落库 kind=text（与普通文字同渲染）。
   Future<Map<String, dynamic>?> _sendBotText(
     String body, {
@@ -435,7 +435,7 @@ class ChatSessionController {
       return;
     }
 
-    // ★机器人（罗吒）明文回复：plaintext=true，ciphertext 是 base64 明文 JSON，
+    // ★机器人（哪吒）明文回复：plaintext=true，ciphertext 是 base64 明文 JSON，
     //   直接解码（不经棘轮解密）。
     if (payload['plaintext'] == true) {
       await _handlePlaintextBotMessage(

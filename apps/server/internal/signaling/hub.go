@@ -254,7 +254,7 @@ func (c *Client) readPump() {
 // handleChatMessage 处理聊天消息中继。目标在线 → 直转；离线 → 入 Redis 队列（24h TTL）。
 // 队列只存端到端密文信封 + 路由信息；服务器始终无法解密消息内容。
 func (h *Hub) handleChatMessage(signal map[string]interface{}, raw []byte, fromID, toID string) {
-	// ★机器人（罗吒）消息：@罗吒 走明文旁路（非 E2EE），服务器解析文本 →
+	// ★机器人（哪吒）消息：@哪吒 走明文旁路（非 E2EE），服务器解析文本 →
 	// 调外部智能体 → 拿回复发回发送方。
 	if strings.HasPrefix(toID, "bot-") {
 		h.handleBotMessage(signal, raw, fromID, toID)
@@ -300,7 +300,7 @@ func (h *Hub) handleChatMessage(signal map[string]interface{}, raw []byte, fromI
 	log.Printf("[CHAT] queued for offline user=%s message_id=%s", toID, msgID)
 }
 
-// handleBotMessage 处理@罗吒消息：明文 payload（客户端对 bot- 前缀走明文旁路），
+// handleBotMessage 处理@哪吒消息：明文 payload（客户端对 bot- 前缀走明文旁路），
 // 解析文本 → 调外部智能体 HTTP API（BOT_AGENT_URL，先定义接口）→ 拿回复 →
 // 作为 bot 回复消息发回发送方。无智能体时返回占位回复。
 func (h *Hub) handleBotMessage(signal map[string]interface{}, raw []byte, fromID, toID string) {
@@ -323,7 +323,7 @@ func (h *Hub) handleBotMessage(signal map[string]interface{}, raw []byte, fromID
 	}
 
 	// 调外部智能体（BOT_AGENT_URL 可配置；先定义接口 {user_id, text} → {text}）。
-	reply := "罗吒收到：\"" + text + "\"。智能体对接开发中，稍后回复。"
+	reply := "哪吒收到：\"" + text + "\"。智能体对接开发中，稍后回复。"
 	if url := os.Getenv("BOT_AGENT_URL"); url != "" {
 		if resp, err := callBotAgent(url, fromID, text); err == nil {
 			reply = resp
