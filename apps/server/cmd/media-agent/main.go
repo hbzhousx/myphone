@@ -46,6 +46,18 @@ func main() {
 	// Manager 需要 Signaling 回推 → 桥（manager↔bridge 互相引用，用 setter 注入）。
 	manager.SetSignaling(bs)
 
+	// v1.50+ 方案 A：配置 AGENT_GATEWAY_URL 时，接入 qwen-audio-agent 语音引擎
+	// （libopus 转码 Opus↔PCM16k/24k）。未配置则回退 asr/tts/agent 三件套。
+	if os.Getenv("AGENT_GATEWAY_URL") != "" {
+		codec, err := media.NewOpusCodec()
+		if err != nil {
+			log.Fatalf("[MEDIA-AGENT] NewOpusCodec failed: %v (需 libopus-dev + CGO)", err)
+		}
+		gw := media.NewGatewayClient(codec)
+		manager.SetGateway(gw, codec)
+		log.Printf("[MEDIA-AGENT] gateway voice engine: %s", os.Getenv("AGENT_GATEWAY_URL"))
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/bridge", bs.Handler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -53,8 +65,8 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	log.Printf("[MEDIA-AGENT] listening on %s (asr=%q tts=%q agent=%q)",
-		addr, os.Getenv("AGENT_ASR_URL"), os.Getenv("AGENT_TTS_URL"), agentURL)
+	log.Printf("[MEDIA-AGENT] listening on %s (gateway=%q asr=%q tts=%q agent=%q)",
+		addr, os.Getenv("AGENT_GATEWAY_URL"), os.Getenv("AGENT_ASR_URL"), os.Getenv("AGENT_TTS_URL"), agentURL)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("[MEDIA-AGENT] server error: %v", err)
 	}

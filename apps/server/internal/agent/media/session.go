@@ -129,6 +129,11 @@ type Manager struct {
 	agent      AgentText
 	iceServers []webrtc.ICEServer
 
+	// gateway 是可选的 qwen-audio-agent 语音引擎客户端。配置了 AGENT_GATEWAY_URL
+	// 时，入站语音/出站语音/字幕/回流全部经 Gateway；否则回退 asr/tts/agent。
+	gateway *GatewayClient
+	codec   *OpusCodec
+
 	mu       sync.Mutex
 	sessions map[string]*Session
 }
@@ -148,6 +153,14 @@ func NewManager(sig Signaling, asr ASR, tts TTS, agent AgentText, iceServers []w
 func (m *Manager) SetSignaling(sig Signaling) {
 	m.mu.Lock()
 	m.sig = sig
+	m.mu.Unlock()
+}
+
+// SetGateway 注入 qwen-audio-agent 语音引擎客户端（有则优先走 Gateway）。
+func (m *Manager) SetGateway(gw *GatewayClient, codec *OpusCodec) {
+	m.mu.Lock()
+	m.gateway = gw
+	m.codec = codec
 	m.mu.Unlock()
 }
 
@@ -215,7 +228,7 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 		}
 	})
 	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-		// 入站用户语音：逐 RTP 包抽 Opus payload → ASR provider。
+		// 入站用户语音：逐 RTP 包抽 Opus payload。
 		go func() {
 			for {
 				pkt, _, err := tr.ReadRTP()
@@ -225,9 +238,23 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 				if len(pkt.Payload) == 0 {
 					continue
 				}
-				if err := s.pipeline.FeedFrame(pkt.Payload); err != nil {
-					log.Printf("[MEDIA] feed failed: %v", err)
-					break
+				m.mu.Lock()
+				gw := m.gateway
+				codec := m.codec
+				m.mu.Unlock()
+				if gw != nil && codec != nil {
+					// 方案 A：Opus → PCM16k → Gateway 语音引擎。
+					pcm16, err := codec.DecodeTo16k(pkt.Payload)
+					if err != nil {
+						continue
+					}
+					gw.AppendPCM16k(pcm16)
+				} else {
+					// 回退：原 ASR provider。
+					if err := s.pipeline.FeedFrame(pkt.Payload); err != nil {
+						log.Printf("[MEDIA] feed failed: %v", err)
+						break
+					}
 				}
 			}
 		}()
