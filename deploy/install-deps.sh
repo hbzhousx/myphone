@@ -82,6 +82,14 @@ AGENT_MEDIA_WS_URL=ws://127.0.0.1:8090/bridge
 AGENT_BRIDGE_TOKEN=${BRIDGE_TOKEN}
 # 媒体端点监听地址（仅本机回环，不直接暴露公网）
 AGENT_LISTEN_ADDR=127.0.0.1:8090
+# ---- v1.50+ 方案 A：qwen-audio-agent 语音引擎 ----
+# 配置后 media-agent 把手机语音经 libopus 转码接 qwen-audio-agent Gateway。
+# qwen-audio-agent 需先装好并配置（DASHSCOPE_API_KEY 或 s2s）。
+AGENT_GATEWAY_URL=ws://127.0.0.1:3101/api/realtime
+# AGENT_GATEWAY_SESSION_ID=user_personal
+# ---- 后台 Agent（可选，让哪吒执行工具/多步任务，如"订机票/跑代码"）----
+# AGENT_PROTOCOL=hermes
+# HERMES_BIN=/usr/local/bin/hermes
 # 外部 ASR/TTS/Agent（缺省留空 → 媒体端点回退本地回声，仍可全链路演示）
 # AGENT_ASR_URL=ws://asr.example.com/stream
 # AGENT_TTS_URL=https://tts.example.com/synthesize
