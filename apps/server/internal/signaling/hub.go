@@ -53,9 +53,11 @@ type AgentBridge interface {
 }
 
 // 连接风暴节流：同一用户窗口内注册次数超限则丢弃（防双 WS 互踢风暴）。
+// ★阈值要足够高，只拦真正的病态风暴(几十次/秒)，不能误伤正常重连
+//   （服务器重启后所有客户端同时退避重连可能瞬时几十次）。
 const (
 	connStormWindow = 8 * time.Second // 统计窗口
-	connStormMax    = 5               // 窗口内最大注册次数
+	connStormMax    = 50              // 窗口内最大注册次数
 )
 
 type Hub struct {
@@ -125,16 +127,10 @@ func (h *Hub) Run() {
 			}
 			h.connRecent[client.userID] = recent
 
-			// 主动关闭旧连接：同一 userID 只保留最新一条 WS。
-			// 旧连接若不关会继续收消息 → 与新连接互踢（服务器覆盖 map 但旧 conn
-			// 仍活），造成"频繁 offline"。关闭后旧 readPump 自然退出、unregister。
-			if old := h.clients[client.userID]; old != nil {
-				// 从 map 移除旧连接，close send 触发其 writePump 退出。
-				delete(h.clients, client.userID)
-				close(old.send)
-				_ = old.conn.Close()
-				log.Printf("client replaced (old closed): %s", client.userID)
-			}
+			// 只覆盖 map 指向最新连接，不主动 close 旧连接。
+			// ★不要 close 旧连接：客户端多连接同时连时，close 会误杀刚建立的新连接
+			//   → 客户端感知断开 → 重连 → 又关 → 死循环风暴（已实测）。
+			//   旧连接会因客户端侧自然断开而 unregister（unregister 有身份保护）。
 			h.clients[client.userID] = client
 			h.mu.Unlock()
 			log.Printf("client connected: %s", client.userID)

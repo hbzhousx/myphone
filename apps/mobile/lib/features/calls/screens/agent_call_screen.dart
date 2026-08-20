@@ -65,10 +65,19 @@ class _AgentCallScreenState extends ConsumerState<AgentCallScreen> {
 
     if (!mounted) return;
     // 发起 AI 会话。
-    await ref.read(agentCallStateProvider.notifier).start(
-          contactId: widget.contactId,
-          contactName: _displayName,
-        );
+    try {
+      await ref.read(agentCallStateProvider.notifier).start(
+            contactId: widget.contactId,
+            contactName: _displayName,
+          );
+    } catch (e) {
+      debugPrint('[AGENT-CALL] start failed: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法开启 AI 通话：麦克风权限未授予或启动失败')),
+      );
+      context.go('/chat/${widget.contactId}');
+    }
   }
 
   @override

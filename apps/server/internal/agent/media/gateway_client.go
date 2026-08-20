@@ -43,6 +43,9 @@ type GatewayClient struct {
 	onVoiceReady      func()
 	onError           func(err error)
 
+	appendCount int // 已发出的 audio.append 计数（日志用）
+	energyCount int // PCM 能量检测计数（日志用）
+
 	closed atomic.Bool
 }
 
@@ -86,6 +89,9 @@ func (g *GatewayClient) sendConnect() {
 		"outputEnabled": true,
 		"textOnly":      false,
 	})
+	// ★不在 connect 后立即 unmute：Gateway 需先 ensureFrontend（建立 DashScope 会话）
+	//   才接受 unmute 激活。等 voice.ready 事件到达再发 unmute（见 dispatch）。
+	//   参照 qwen-audio-agent Web 客户端：connect → 等 voice.ready → enableMicrophone 发 unmute。
 }
 
 // AppendPCM16k 送一帧用户 PCM16k 给 Gateway（由 session 在 Opus→PCM16k 后调用）。
@@ -93,16 +99,35 @@ func (g *GatewayClient) AppendPCM16k(pcm []int16) {
 	if g.conn == nil {
 		return
 	}
+	// ★能量检测：确认解码出的 PCM 非静音（否则 Gateway 收不到语音）。
+	g.energyCount++
+	if g.energyCount%200 == 0 {
+		var sum int64
+		for _, s := range pcm {
+			sum += int64(s) * int64(s)
+		}
+		rms := 0.0
+		if len(pcm) > 0 {
+			rms = sqrt(float64(sum) / float64(len(pcm)))
+		}
+		log.Printf("[GATEWAY] PCM energy rms=%.0f (should be >100 if speech)", rms)
+	}
 	// int16 → []byte（LE）。
 	buf := make([]byte, len(pcm)*2)
 	for i, s := range pcm {
 		buf[i*2] = byte(s)
 		buf[i*2+1] = byte(s >> 8)
 	}
-	g.send(map[string]interface{}{
+	// ★日志：确认 audio.append 真的发到 Gateway（conn 断了会被 send 静默丢）。
+	if g.send(map[string]interface{}{
 		"type":  "audio.append",
 		"audio": base64.StdEncoding.EncodeToString(buf),
-	})
+	}) {
+		g.appendCount++
+		if g.appendCount%100 == 0 {
+			log.Printf("[GATEWAY] sent %d audio.append", g.appendCount)
+		}
+	}
 }
 
 // Interrupt 打断当前回复。
@@ -110,16 +135,18 @@ func (g *GatewayClient) Interrupt() {
 	g.send(map[string]interface{}{"type": "interrupt"})
 }
 
-func (g *GatewayClient) send(event map[string]interface{}) {
+func (g *GatewayClient) send(event map[string]interface{}) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.conn == nil {
-		return
+		return false
 	}
 	b, _ := json.Marshal(event)
 	if err := g.conn.WriteMessage(websocket.TextMessage, b); err != nil {
 		log.Printf("[GATEWAY] send failed: %v", err)
+		return false
 	}
+	return true
 }
 
 // readLoop 读 Gateway 事件并分发。
@@ -167,6 +194,10 @@ func (g *GatewayClient) dispatch(e struct {
 }) {
 	switch e.Type {
 	case "voice.ready":
+		// Gateway 已就绪（DashScope 会话建立）→ 此时才激活音频输入。
+		// 必须带 takeover:true（旧连接若占 owner 会被 activate 拒绝）。
+		log.Printf("[GATEWAY] voice.ready received — activating audio input")
+		g.send(map[string]interface{}{"type": "unmute", "takeover": true})
 		if g.onVoiceReady != nil {
 			g.onVoiceReady()
 		}
@@ -206,6 +237,21 @@ func (g *GatewayClient) dispatch(e struct {
 			g.onError(parseGatewayErr(e.Message))
 		}
 	}
+}
+
+func sqrt(x float64) float64 {
+	// 简单牛顿法平方根（避免引入 math 依赖）。
+	if x <= 0 {
+		return 0
+	}
+	g := x / 2
+	for i := 0; i < 20; i++ {
+		if g <= 0 {
+			return 0
+		}
+		g = (g + x/g) / 2
+	}
+	return g
 }
 
 func parseGatewayErr(msg string) error {

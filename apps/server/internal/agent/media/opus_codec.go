@@ -20,10 +20,12 @@ const (
 	gatewayInputRate  = 16000 // Gateway 输入采样率（PCM16k）
 	gatewayOutputRate = 24000 // Gateway 输出采样率（PCM24k）
 	webrtcRate        = 48000 // WebRTC Opus 采样率
-	channels          = 1     // 单声道
-	frameSize16k      = 320   // 16k * 20ms
-	frameSize24k      = 480   // 24k * 20ms
-	frameSize48k      = 960   // 48k * 20ms
+	// ★双声道：手机 WebRTC 的 Opus 是 opus/48000/2（stereo）。用 mono 解码会
+	//   只解一个声道 → 能量极低 → Gateway 收不到语音。用 stereo 解码再降采样。
+	channels     = 2
+	frameSize16k = 320 // 16k * 20ms
+	frameSize24k = 480 // 24k * 20ms
+	frameSize48k = 960 // 48k * 20ms
 )
 
 // OpusCodec 持有 libopus 编解码器（48kHz 单声道）。
@@ -59,23 +61,35 @@ func NewOpusCodec() (*OpusCodec, error) {
 	return &OpusCodec{enc48: enc, dec48: dec}, nil
 }
 
-// DecodeTo16k 把一帧手机 Opus(48k) 解码为 PCM 16k 单声道（送 Gateway）。
-// 返回 int16 PCM(16k)。frameSize 按 20ms 推：48k*20ms=960 samples。
+// DecodeTo16k 把一帧手机 Opus(48k stereo) 解码为 PCM 16k 单声道（送 Gateway）。
+// 返回 int16 PCM(16k)。20ms stereo 解码出 960×2=1920 samples → 取左声道 960 →
+// 48k→16k 抽 1/3 → 320 samples。
 func (c *OpusCodec) DecodeTo16k(opusFrame []byte) ([]int16, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	pcm48 := make([]int16, frameSize48k)
+	pcm48 := make([]int16, frameSize48k*channels)
 	n, err := c.dec48.Decode(opusFrame, pcm48)
 	if err != nil {
 		return nil, err
 	}
-	// 48k→16k 抽 1/3。
-	pcm16 := make([]int16, n/3)
+	// n 是每声道 samples 数。取左声道。
+	frames := n / channels
+	if frames <= 0 {
+		return nil, errDecoderEmpty
+	}
+	// 48k→16k 抽 1/3（左声道）。
+	pcm16 := make([]int16, frames/3)
 	for i := range pcm16 {
-		pcm16[i] = pcm48[i*3]
+		pcm16[i] = pcm48[i*3*channels] // 左声道采样
 	}
 	return pcm16, nil
 }
+
+var errDecoderEmpty = &opusError{msg: "opus decoder empty"}
+
+type opusError struct{ msg string }
+
+func (e *opusError) Error() string { return e.msg }
 
 // EncodeFrom24k 把 Gateway 的 PCM 24k 重采样到 48k 并编码为 Opus 帧（回手机）。
 // 线性插值 24k→48k（每 2 个输入样本插 1 个）。

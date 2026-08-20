@@ -171,7 +171,13 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 		old.Close()
 		delete(m.sessions, userID)
 	}
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{ICEServers: m.iceServers})
+	// 强制 relay-only：手机(公网)与 media-agent(阿里云)直连基本不可能，
+	// 必须走 TURN 中继；与客户端 iceTransportPolicy=relay 保持一致，
+	// 避免"手机 all 直连失败/中继"与"Pion 默认 all"策略不匹配导致 ICE failed。
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
+		ICEServers:         m.iceServers,
+		ICETransportPolicy: webrtc.ICETransportPolicyRelay,
+	})
 	if err != nil {
 		m.mu.Unlock()
 		log.Printf("[MEDIA] NewPeerConnection failed: %v", err)
@@ -209,9 +215,11 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c == nil {
+			log.Printf("[MEDIA] %s ICE gathering complete", userID)
 			return
 		}
 		j := c.ToJSON()
+		log.Printf("[MEDIA] %s ICE candidate: %s", userID, j.Candidate)
 		s.send("agentSignal", map[string]interface{}{
 			"signal": map[string]interface{}{
 				"type":             "ice",
@@ -229,14 +237,26 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 	})
 	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		// 入站用户语音：逐 RTP 包抽 Opus payload。
+		log.Printf("[MEDIA] %s OnTrack fired (track=%s)", userID, tr.Kind())
+		var frameCount int
 		go func() {
 			for {
 				pkt, _, err := tr.ReadRTP()
 				if err != nil {
+					log.Printf("[MEDIA] %s OnTrack read end: %v (frames=%d)", userID, err, frameCount)
 					break
 				}
 				if len(pkt.Payload) == 0 {
 					continue
+				}
+				frameCount++
+				if frameCount%100 == 0 {
+					// ★诊断：打印 payload 头（Opus 帧以 TOC 字节开头，如 0xF8/0xF9 等）。
+					head := pkt.Payload
+					if len(head) > 4 {
+						head = head[:4]
+					}
+					log.Printf("[MEDIA] %s received %d audio frames (payload=%d head=%x)", userID, frameCount, len(pkt.Payload), head)
 				}
 				m.mu.Lock()
 				gw := m.gateway
@@ -246,6 +266,10 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 					// 方案 A：Opus → PCM16k → Gateway 语音引擎。
 					pcm16, err := codec.DecodeTo16k(pkt.Payload)
 					if err != nil {
+						// ★解码失败会导致音频不发 → Gateway 无识别。打日志定位。
+						if frameCount%100 == 0 {
+							log.Printf("[MEDIA] %s DecodeTo16k failed: %v (payload=%d bytes)", userID, err, len(pkt.Payload))
+						}
 						continue
 					}
 					gw.AppendPCM16k(pcm16)
@@ -302,8 +326,18 @@ func (m *Manager) HandleSignal(userID string, signal map[string]interface{}) {
 		log.Printf("[MEDIA] answer sent to %s", userID)
 	case "ice":
 		candidate, _ := sig["candidate"].(string)
-		mid := sig["sdp_mid"].(string)
-		idx := uint16(sig["sdp_m_line_index"].(int))
+		mid, _ := sig["sdp_mid"].(string)
+		// ★安全转换：JSON 数字解码为 float64，若用 .(int) 断言会 panic → 桥崩 → ICE 丢。
+		//   兼容 int / float64 / nil。
+		var idx uint16
+		switch v := sig["sdp_m_line_index"].(type) {
+		case float64:
+			idx = uint16(v)
+		case int:
+			idx = uint16(v)
+		case int64:
+			idx = uint16(v)
+		}
 		_ = s.pc.AddICECandidate(webrtc.ICECandidateInit{
 			Candidate:     candidate,
 			SDPMid:        &mid,

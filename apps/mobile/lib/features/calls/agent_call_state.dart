@@ -16,6 +16,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
+import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../app/auth_guard.dart';
@@ -115,6 +116,17 @@ class AgentCallStateNotifier extends StateNotifier<AgentCallState?> {
 
     final sessionId = _uuid.v4();
     final currentUserId = await _resolveCurrentUserId();
+
+    // ★请求麦克风权限：普通通话(CallScreen)有权限请求，AI 通话此前没有 →
+    //   getUserMedia 拿到静音流 → 手机说话对方听不到。必须显式请求。
+    var micStatus = await Permission.microphone.status;
+    if (!micStatus.isGranted) {
+      micStatus = await Permission.microphone.request();
+    }
+    if (!micStatus.isGranted) {
+      debugPrint('[AGENT-CALL] microphone permission denied: $micStatus');
+      throw StateError('microphone permission denied');
+    }
 
     final webrtc = WebrtcManager();
     await webrtc.initialize();
