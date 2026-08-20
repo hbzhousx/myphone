@@ -52,11 +52,20 @@ type AgentBridge interface {
 	SendToAgent(fromID, botID string, raw []byte)
 }
 
+// 连接风暴节流：同一用户窗口内注册次数超限则丢弃（防双 WS 互踢风暴）。
+const (
+	connStormWindow = 8 * time.Second // 统计窗口
+	connStormMax    = 5               // 窗口内最大注册次数
+)
+
 type Hub struct {
 	clients    map[string]*Client
 	register   chan *Client
 	unregister chan *Client
 	mu         sync.RWMutex
+
+	// 连接风暴追踪：userID → 最近注册时间戳队列。
+	connRecent map[string][]time.Time
 
 	// Redis 客户端（可为 nil：聊天离线消息退化为「离线即丢弃」，不影响通话中继）。
 	redis *redis.Client
@@ -87,6 +96,7 @@ func NewHub(redisClient *redis.Client) *Hub {
 		redis:         redisClient,
 		StartTime:     time.Now(),
 		ActiveCallIDs: make(map[string]bool),
+		connRecent:    make(map[string][]time.Time),
 	}
 }
 
@@ -94,7 +104,37 @@ func (h *Hub) Run() {
 	for {
 		select {
 		case client := <-h.register:
+			// 连接风暴节流：窗口内注册过密 → 丢弃本次，避免双 WS 互踢风暴
+			// （新连接踢旧连接、旧连接又重连，形成高频 connect/disconnect）。
 			h.mu.Lock()
+			now := time.Now()
+			recent := h.connRecent[client.userID]
+			recent = append(recent, now)
+			cutoff := now.Add(-connStormWindow)
+			i := 0
+			for i < len(recent) && recent[i].Before(cutoff) {
+				i++
+			}
+			recent = recent[i:]
+			if len(recent) > connStormMax {
+				h.connRecent[client.userID] = recent
+				h.mu.Unlock()
+				log.Printf("client connect storm (throttled): %s (%d in %s)", client.userID, len(recent), connStormWindow)
+				client.conn.Close()
+				continue
+			}
+			h.connRecent[client.userID] = recent
+
+			// 主动关闭旧连接：同一 userID 只保留最新一条 WS。
+			// 旧连接若不关会继续收消息 → 与新连接互踢（服务器覆盖 map 但旧 conn
+			// 仍活），造成"频繁 offline"。关闭后旧 readPump 自然退出、unregister。
+			if old := h.clients[client.userID]; old != nil {
+				// 从 map 移除旧连接，close send 触发其 writePump 退出。
+				delete(h.clients, client.userID)
+				close(old.send)
+				_ = old.conn.Close()
+				log.Printf("client replaced (old closed): %s", client.userID)
+			}
 			h.clients[client.userID] = client
 			h.mu.Unlock()
 			log.Printf("client connected: %s", client.userID)

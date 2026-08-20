@@ -124,6 +124,11 @@ public class MainActivity extends FlutterFragmentActivity {
                         result.success(ok);
                         break;
                     }
+                    case "isServiceAlive": {
+                        // Flutter 探活：常驻服务进程是否存活（华为杀后台后返回 false）。
+                        result.success(CallService.isRunning());
+                        break;
+                    }
                     case "setAppActive": {
                         CallService.setAppActive(Boolean.TRUE.equals(call.argument("active")));
                         result.success(null);

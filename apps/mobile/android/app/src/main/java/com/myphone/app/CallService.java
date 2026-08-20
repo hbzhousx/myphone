@@ -101,6 +101,9 @@ public class CallService extends Service {
 
     /** 运行中的服务实例；null 表示未运行。 */
     private static CallService instance;
+
+    /** 常驻服务进程是否存活（Flutter 探活用：华为等系统杀后台后返回 false）。 */
+    public static boolean isRunning() { return instance != null; }
     /** Flutter 侧 EventChannel 的 sink；app 被杀时可能为 null。 */
     private static volatile EventChannel.EventSink eventSink;
 

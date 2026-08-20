@@ -177,6 +177,10 @@ class ServiceBridgeSignalingClient extends SignalingClient {
   final _signalController = StreamController<CallSignal>.broadcast();
   final _chatController = StreamController<ChatSignal>.broadcast();
   StreamSubscription? _eventSub;
+  Timer? _probeTimer;
+  VoidCallback? _onDisconnected;
+  bool _disposed = false;
+  bool _fallbackAttempted = false;
 
   @override
   Stream<CallSignal> get signals => _signalController.stream;
@@ -185,9 +189,7 @@ class ServiceBridgeSignalingClient extends SignalingClient {
   Stream<ChatSignal> get chatSignals => _chatController.stream;
 
   @override
-  set onDisconnected(VoidCallback? cb) {
-    // 桥接模式不触发 onDisconnected：服务自愈重连，由服务端保证在线。
-  }
+  set onDisconnected(VoidCallback? cb) => _onDisconnected = cb;
 
   @override
   Future<void> connect() async {
@@ -209,9 +211,64 @@ class ServiceBridgeSignalingClient extends SignalingClient {
         }
       },
       onError: (Object _) {
-        // 服务自愈重连，Flutter 侧不把断连上报给 CallStateNotifier。
+        // EventChannel 断开（服务被杀）→ 视为服务掉线，走探活兜底。
+        debugPrint('[SERVICE-BRIDGE] event channel error (service likely dead)');
+        _handleServiceDown();
       },
     );
+    _startProbe();
+  }
+
+  /// 定时探活：常驻服务进程被系统(华为等)杀掉后，Flutter 无感知 → 彻底离线。
+  /// 每 30s 调 isServiceAlive；服务没了 → 尝试拉起 + fallback DirectWS。
+  void _startProbe() {
+    _probeTimer?.cancel();
+    _probeTimer = Timer.periodic(const Duration(seconds: 30), (_) => _probeOnce());
+  }
+
+  Future<void> _probeOnce() async {
+    if (_disposed) return;
+    var alive = false;
+    try {
+      alive = await _channel
+              .invokeMethod<bool>('isServiceAlive')
+              .timeout(const Duration(seconds: 3)) ?? false;
+    } catch (_) {
+      alive = false; // MethodChannel 抛异常 = 服务进程已死
+    }
+    if (!alive && !_disposed) {
+      debugPrint('[SERVICE-BRIDGE] probe: service NOT alive — recovering');
+      _handleServiceDown();
+    }
+  }
+
+  /// 服务掉线恢复：先尝试拉起常驻服务；拉不起(华为禁后台)→ fallback DirectWS。
+  Future<void> _handleServiceDown() async {
+    if (_disposed || _fallbackAttempted) return;
+    _fallbackAttempted = true;
+    _probeTimer?.cancel();
+
+    // ① 尝试重新拉起常驻服务。
+    try {
+      await ResidentService.ensureStarted();
+      // 给服务一点启动时间，再探一次。
+      await Future.delayed(const Duration(seconds: 2));
+      final alive = await _channel
+              .invokeMethod<bool>('isServiceAlive')
+              .timeout(const Duration(seconds: 3)) ?? false;
+      if (alive) {
+        debugPrint('[SERVICE-BRIDGE] service recovered after ensureStarted');
+        _fallbackAttempted = false;
+        _startProbe();
+        return;
+      }
+    } catch (e) {
+      debugPrint('[SERVICE-BRIDGE] ensureStarted failed: $e');
+    }
+
+    // ② 拉不起 → fallback 到 DirectWS，保证通话/聊天可用（牺牲常驻保活）。
+    debugPrint('[SERVICE-BRIDGE] fallback to DirectWS (service unrecoverable)');
+    _onDisconnected?.call();
   }
 
   @override
@@ -242,6 +299,9 @@ class ServiceBridgeSignalingClient extends SignalingClient {
 
   @override
   void dispose() {
+    _disposed = true;
+    _probeTimer?.cancel();
+    _probeTimer = null;
     _eventSub?.cancel();
     _eventSub = null;
     _signalController.close();
