@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -30,6 +31,7 @@ type DashScopeClient struct {
 	mu     sync.Mutex
 	conn   *websocket.Conn
 	ready  bool
+	closed bool // 进程退出标记，禁止重连
 
 	agentBuf string // 当前回复的完整文本累积（audio_transcript.delta 增量 → done 合并发）
 }
@@ -99,8 +101,15 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 			c.mu.Lock()
 			if c.conn == conn {
 				c.conn = nil
+				c.ready = false
 			}
+			reconnect := !c.closed
 			c.mu.Unlock()
+			// ★自动重连：DashScope WS 会因 idle_timeout 等断开，断后必须重连，
+			//   否则 AI 语音永久失效（今早线上事故根因）。
+			if reconnect {
+				go c.reconnectAfterDelay()
+			}
 			return
 		}
 		var e struct {
@@ -195,6 +204,33 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 		case "error":
 			log.Printf("[DASHSCOPE] error: %s", msg)
 		}
+	}
+}
+
+// reconnectAfterDelay 断开后延迟重连(3s,防风暴);进程退出则不重连。
+func (c *DashScopeClient) reconnectAfterDelay() {
+	if c.closed {
+		return
+	}
+	time.Sleep(3 * time.Second)
+	c.mu.Lock()
+	if c.closed || c.conn != nil {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+	c.connect()
+}
+
+// Close 关闭连接并禁止重连(进程退出)。
+func (c *DashScopeClient) Close() {
+	c.mu.Lock()
+	c.closed = true
+	conn := c.conn
+	c.conn = nil
+	c.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
 	}
 }
 
