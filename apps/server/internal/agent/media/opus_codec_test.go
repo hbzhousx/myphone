@@ -1,7 +1,9 @@
 package media
 
 import (
+	"encoding/base64"
 	"math/rand"
+	"os"
 	"testing"
 )
 
@@ -74,5 +76,60 @@ func TestOpusEncodeFrom24k(t *testing.T) {
 	}
 	if len(pcm16) == 0 {
 		t.Fatalf("decoded back empty")
+	}
+}
+
+// TestEncodeLargeDeltaFromProd:生产日志提取的真实 DashScope delta
+// (7680 samples @24k ≈ 320ms)。旧 bug：整块一次 Encode 超 libopus 帧上限
+// 全丢；修复后按 20ms 切帧应出 16 帧。依赖 /tmp/real_delta.b64(无则跳过)。
+func TestEncodeLargeDeltaFromProd(t *testing.T) {
+	b64, err := os.ReadFile("/tmp/real_delta.b64")
+	if err != nil {
+		t.Skip("no /tmp/real_delta.b64")
+	}
+	raw := string(b64)
+	for len(raw) > 0 && raw[len(raw)-1] == '\n' {
+		raw = raw[:len(raw)-1]
+	}
+	buf, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatalf("base64: %v", err)
+	}
+	pcm := make([]int16, len(buf)/2)
+	for i := range pcm {
+		pcm[i] = int16(buf[i*2]) | int16(buf[i*2+1])<<8
+	}
+	t.Logf("decoded %d bytes = %d samples @24k = %.0fms", len(buf), len(pcm), float64(len(pcm))*1000/24000)
+
+	codec, err := NewOpusCodec()
+	if err != nil {
+		t.Fatalf("NewOpusCodec: %v", err)
+	}
+	// 模拟 dashscope_client.go 的切帧逻辑。
+	const frameSamples = 480
+	ok, fail := 0, 0
+	for start := 0; start < len(pcm); start += frameSamples {
+		end := start + frameSamples
+		if end > len(pcm) {
+			end = len(pcm)
+		}
+		chunk := pcm[start:end]
+		if len(chunk) < frameSamples {
+			full := make([]int16, frameSamples)
+			copy(full, chunk)
+			chunk = full
+		}
+		opus, err := codec.EncodeFrom24k(chunk)
+		if err != nil {
+			fail++
+			t.Logf("  frame %d FAIL: %v (chunk=%d)", start/frameSamples, err, len(chunk))
+			continue
+		}
+		ok++
+		t.Logf("  frame %d OK: %d bytes", start/frameSamples, len(opus))
+	}
+	t.Logf("== %d OK, %d FAIL ==", ok, fail)
+	if fail > 0 {
+		t.Errorf("有 %d 帧编码失败", fail)
 	}
 }
