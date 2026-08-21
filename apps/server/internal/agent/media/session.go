@@ -10,6 +10,8 @@ package media
 
 import (
 	"log"
+	"encoding/base64"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -105,6 +107,34 @@ func (s *Session) PlayFrame(frame []byte) {
 }
 
 // Close 释放 PeerConnection 与管线。
+// bindDash 把 DashScope 直连客户端的回调接到本会话：
+// 回复音频→PlayFrame回手机；识别/回复文本→字幕；完整回复→聊天回流。
+func (s *Session) bindDash(d *DashScopeClient) {
+	log.Printf("[MEDIA] %s bindDash to session %s", s.userID, s.sessionID)
+	d.SetCallbacks(
+		func(frame []byte) {
+			log.Printf("[MEDIA] %s play frame %d bytes", s.userID, len(frame))
+			s.PlayFrame(frame)
+		},
+		func(who, text string) {
+			seq := int(time.Now().UnixMilli() % 100000)
+			s.SendTranscript(seq, who, text, true)
+		},
+		func(text string) {
+			// 聊天历史回流（bot 明文 chatMessage）。
+			plain := map[string]interface{}{"kind": "agent", "body": text}
+			plainJSON, _ := json.Marshal(plain)
+			payload := map[string]interface{}{
+				"message_id": "agent-" + nowStr(time.Now().UnixMilli()),
+				"ciphertext": base64.StdEncoding.EncodeToString(plainJSON),
+				"counter":    0,
+				"plaintext":  true,
+			}
+			s.SendToServer(s.userID, "chatMessage", payload)
+		},
+	)
+}
+
 func (s *Session) Close() {
 	s.mu.Lock()
 	if s.closed {
@@ -132,7 +162,8 @@ type Manager struct {
 	// gateway 是可选的 qwen-audio-agent 语音引擎客户端。配置了 AGENT_GATEWAY_URL
 	// 时，入站语音/出站语音/字幕/回流全部经 Gateway；否则回退 asr/tts/agent。
 	gateway *GatewayClient
-	codec   *OpusCodec
+	dash   *DashScopeClient
+	codec  *OpusCodec
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -160,6 +191,14 @@ func (m *Manager) SetSignaling(sig Signaling) {
 func (m *Manager) SetGateway(gw *GatewayClient, codec *OpusCodec) {
 	m.mu.Lock()
 	m.gateway = gw
+	m.codec = codec
+	m.mu.Unlock()
+}
+
+// SetDashScope 注入 DashScope 直连客户端（方向 B，优先于 Gateway）。
+func (m *Manager) SetDashScope(d *DashScopeClient, codec *OpusCodec) {
+	m.mu.Lock()
+	m.dash = d
 	m.codec = codec
 	m.mu.Unlock()
 }
@@ -211,6 +250,10 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 		ssrc:      ssrc,
 	}
 	s.pipeline = NewPipeline(s, m.asr, m.tts, m.agent, userID)
+	// 方向 B：把 DashScope 直连回调接到本会话（回复音频/字幕/聊天回流）。
+	if m.dash != nil {
+		s.bindDash(m.dash)
+	}
 	m.sessions[userID] = s
 
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
@@ -260,10 +303,18 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 				}
 				m.mu.Lock()
 				gw := m.gateway
+				dash := m.dash
 				codec := m.codec
 				m.mu.Unlock()
-				if gw != nil && codec != nil {
-					// 方案 A：Opus → PCM16k → Gateway 语音引擎。
+				// ★方向 B 优先：DashScope 直连客户端（旁路已验证手机 PCM 有效）。
+				if dash != nil && codec != nil {
+					pcm16, err := codec.DecodeTo16k(pkt.Payload)
+					if err != nil {
+						continue
+					}
+					dash.AppendPCM16k(pcm16)
+				} else if gw != nil && codec != nil {
+					// 方案 A 回退：qwen-audio-agent Gateway。
 					pcm16, err := codec.DecodeTo16k(pkt.Payload)
 					if err != nil {
 						// ★解码失败会导致音频不发 → Gateway 无识别。打日志定位。

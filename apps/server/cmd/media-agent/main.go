@@ -48,11 +48,19 @@ func main() {
 
 	// v1.50+ 方案 A：配置 AGENT_GATEWAY_URL 时，接入 qwen-audio-agent 语音引擎
 	// （libopus 转码 Opus↔PCM16k/24k）。未配置则回退 asr/tts/agent 三件套。
-	if os.Getenv("AGENT_GATEWAY_URL") != "" {
-		codec, err := media.NewOpusCodec()
-		if err != nil {
-			log.Fatalf("[MEDIA-AGENT] NewOpusCodec failed: %v (需 libopus-dev + CGO)", err)
+	// ★方向 B：AGENT_DASHSCOPE_KEY 配置时直连 DashScope(优先于 Gateway)。
+	codec, err := media.NewOpusCodec()
+	if err != nil {
+		log.Fatalf("[MEDIA-AGENT] NewOpusCodec failed: %v (需 libopus-dev + CGO)", err)
+	}
+	if os.Getenv("AGENT_DASHSCOPE_KEY") != "" {
+		ds := media.NewDashScopeClient(codec)
+		if ds != nil {
+			// 回调由每个会话 bindDash 绑定（回复音频→PlayFrame、文本→字幕/回流）。
+			manager.SetDashScope(ds, codec)
+			log.Printf("[MEDIA-AGENT] dashscope voice engine: %s", os.Getenv("AGENT_DASHSCOPE_MODEL"))
 		}
+	} else if os.Getenv("AGENT_GATEWAY_URL") != "" {
 		gw := media.NewGatewayClient(codec)
 		manager.SetGateway(gw, codec)
 		log.Printf("[MEDIA-AGENT] gateway voice engine: %s", os.Getenv("AGENT_GATEWAY_URL"))

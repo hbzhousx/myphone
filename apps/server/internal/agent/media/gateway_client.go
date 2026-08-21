@@ -34,6 +34,9 @@ import (
 type GatewayClient struct {
 	codec *OpusCodec
 
+	// bypass 是 DashScope 直连旁路（联调诊断用，配置 AGENT_DASHSCOPE_KEY 时启用）。
+	bypass *DashScopeBypass
+
 	mu   sync.Mutex
 	conn *websocket.Conn
 
@@ -51,7 +54,7 @@ type GatewayClient struct {
 
 // NewGatewayClient 构造并连接 Gateway。
 func NewGatewayClient(codec *OpusCodec) *GatewayClient {
-	g := &GatewayClient{codec: codec}
+	g := &GatewayClient{codec: codec, bypass: NewDashScopeBypass()}
 	urlStr := os.Getenv("AGENT_GATEWAY_URL")
 	if urlStr == "" {
 		urlStr = "ws://127.0.0.1:3101/api/realtime"
@@ -127,6 +130,10 @@ func (g *GatewayClient) AppendPCM16k(pcm []int16) {
 		if g.appendCount%100 == 0 {
 			log.Printf("[GATEWAY] sent %d audio.append", g.appendCount)
 		}
+	}
+	// ★DashScope 直连旁路：同一段 PCM 同时发 DashScope，验证手机语音是否有效。
+	if g.bypass != nil {
+		g.bypass.AppendPCM16k(pcm)
 	}
 }
 
