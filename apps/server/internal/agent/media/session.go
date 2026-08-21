@@ -41,6 +41,8 @@ type Session struct {
 
 	mu     sync.Mutex
 	closed bool
+
+	playCount int // 已播放帧数（日志降频用）
 }
 
 // SendToServer 直通 Signaling（pipeline 回 chatMessage 用）。
@@ -113,7 +115,10 @@ func (s *Session) bindDash(d *DashScopeClient) {
 	log.Printf("[MEDIA] %s bindDash to session %s", s.userID, s.sessionID)
 	d.SetCallbacks(
 		func(frame []byte) {
-			log.Printf("[MEDIA] %s play frame %d bytes", s.userID, len(frame))
+			if s.playCount%100 == 0 {
+				log.Printf("[MEDIA] %s play frame %d bytes", s.userID, len(frame))
+			}
+			s.playCount++
 			s.PlayFrame(frame)
 		},
 		func(who, text string) {

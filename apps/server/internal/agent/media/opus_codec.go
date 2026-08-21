@@ -91,14 +91,21 @@ type opusError struct{ msg string }
 
 func (e *opusError) Error() string { return e.msg }
 
-// EncodeFrom24k 把 Gateway 的 PCM 24k 重采样到 48k 并编码为 Opus 帧（回手机）。
-// 线性插值 24k→48k（每 2 个输入样本插 1 个）。
+// EncodeFrom24k 把 PCM 24k mono 重采样到 48k 并编码为 Opus 帧（回手机）。
+// 线性插值 24k→48k（每 2 个输入样本插 1 个）；mono→stereo 声道复制（编码器 channels=2）。
+// 注意：调用方必须传≤120ms 的帧（480samples@24k=20ms），libopus 单帧上限 5760samples@48k。
 func (c *OpusCodec) EncodeFrom24k(pcm24 []int16) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	pcm48 := resampleUp(pcm24, 2)
+	pcm48 := resampleUp(pcm24, 2) // mono 48k
+	// mono → stereo interleave（编码器 channels=2，输入必须交错）。
+	st := make([]int16, len(pcm48)*2)
+	for i, s := range pcm48 {
+		st[i*2] = s
+		st[i*2+1] = s
+	}
 	out := make([]byte, 2048)
-	n, err := c.enc48.Encode(pcm48, out)
+	n, err := c.enc48.Encode(st, out)
 	if err != nil {
 		return nil, err
 	}

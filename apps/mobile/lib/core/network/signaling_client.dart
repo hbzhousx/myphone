@@ -223,6 +223,9 @@ class DirectWSSignalingClient extends SignalingClient {
 
   @override
   Future<void> connect() async {
+    // ★幂等保护：chat_state 与 call_state 各自 connect() 同一个单例，
+    //   若不拦截会各调一次 _doConnect → 后一次关掉前一次 → 双 WS 互踢风暴。
+    if (_channel != null) return;
     await _doConnect();
   }
 

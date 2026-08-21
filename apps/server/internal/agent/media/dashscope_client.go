@@ -31,6 +31,7 @@ type DashScopeClient struct {
 	ready       bool
 	appendCount int
 	skipCount   int
+	deltaCount  int
 }
 
 // NewDashScopeClient 构造直连客户端；key 为空返回 nil。
@@ -135,19 +136,52 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 		case "response.audio.delta", "response.output_audio.delta":
 			// 回复音频(PCM) → Opus → 回手机。
 			// ★DashScope 音频在 `delta` 字段（不是 `audio`）。
+			// ★delta 是大块 PCM(≈320ms)，必须切 20ms 帧逐帧编码——整段一次编码
+			//   超 libopus 单帧上限(5760samples@48k)会整体丢弃。
+			c.deltaCount++
 			buf, err := base64.StdEncoding.DecodeString(e.Delta)
-			if err != nil || c.codec == nil || c.play == nil {
+			if err != nil {
+				if c.deltaCount%50 == 0 {
+					log.Printf("[DASHSCOPE] audio.delta decode fail: %v", err)
+				}
+				continue
+			}
+			if c.codec == nil || c.play == nil {
+				if c.deltaCount%50 == 0 {
+					log.Printf("[DASHSCOPE] audio.delta skipped play=%v codec=%v", c.play != nil, c.codec != nil)
+				}
 				continue
 			}
 			pcm := make([]int16, len(buf)/2)
 			for i := range pcm {
 				pcm[i] = int16(buf[i*2]) | int16(buf[i*2+1])<<8
 			}
-			opus, err := c.codec.EncodeFrom24k(pcm)
-			if err != nil {
-				continue
+			// ★切 20ms 帧(24k mono):480 samples/帧。
+			const frameSamples = 480
+			for start := 0; start < len(pcm); start += frameSamples {
+				end := start + frameSamples
+				if end > len(pcm) {
+					end = len(pcm)
+				}
+				chunk := pcm[start:end]
+				if len(chunk) < frameSamples {
+					// 尾帧不足 20ms → 零填充补齐，避免 libopus 帧长不整报错。
+					full := make([]int16, frameSamples)
+					copy(full, chunk)
+					chunk = full
+				}
+				opus, err := c.codec.EncodeFrom24k(chunk)
+				if err != nil {
+					if c.deltaCount%50 == 0 {
+						log.Printf("[DASHSCOPE] encode frame failed: %v (chunk=%d)", err, len(chunk))
+					}
+					continue
+				}
+				c.play(opus)
 			}
-			c.play(opus)
+			if c.deltaCount%50 == 0 {
+				log.Printf("[DASHSCOPE] audio.delta #%d (pcm=%d samples → N frames)", c.deltaCount, len(pcm))
+			}
 		case "response.audio_transcript.delta", "response.output_audio_transcript.delta":
 			if c.sendMsg != nil && e.Delta != "" {
 				c.sendMsg("agent", e.Delta)
