@@ -23,9 +23,14 @@ mkdir -p "$OUT_DIR"
 cd "$ROOT_DIR/apps/server"
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags "-s -w" -o "$OUT_DIR/myphone-server" ./cmd/
-# v1.50 AI 语音媒体端点（Pion WebRTC，零本地 Opus 编解码，纯 Go 交叉编译）
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags "-s -w" -o "$OUT_DIR/media-agent" ./cmd/media-agent/
+# v1.50 AI 语音媒体端点（Pion WebRTC + libopus 转码）。
+# ★必须 CGO_ENABLED=1 + 静态链接 libopus：纯 Go(CGO=0) 无法链接 libopus，
+#   且本机 glibc 2.34 > 服务器 glibc 2.32，动态链接产物报 GLIBC_2.34 not found。
+#   -tags nolibopusfile 避免额外依赖；-static 全静态避免 glibc 版本冲突。
+#   开发机需装 opus-devel(libopus.a 位于 /usr/lib64)。
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+    CGO_LDFLAGS="-static -L/usr/lib64 -l:libopus.a -lm" \
+    go build -tags nolibopusfile -trimpath -ldflags "-s -w" -o "$OUT_DIR/media-agent" ./cmd/media-agent/
 cd - >/dev/null
 
 echo "==> 构建完成："
