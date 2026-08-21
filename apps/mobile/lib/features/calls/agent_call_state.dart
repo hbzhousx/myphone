@@ -49,6 +49,7 @@ class AgentCallState {
   final AgentCallStatus status;
   final List<AgentTranscript> transcripts;
   final String? statusText; // agentReady 状态机补充（listening/speaking/...）
+  final bool isUserSpeaking; // 用户正在说话（麦克风动态图标）
 
   const AgentCallState({
     required this.sessionId,
@@ -57,12 +58,14 @@ class AgentCallState {
     required this.status,
     this.transcripts = const [],
     this.statusText,
+    this.isUserSpeaking = false,
   });
 
   AgentCallState copyWith({
     AgentCallStatus? status,
     List<AgentTranscript>? transcripts,
     String? statusText,
+    bool? isUserSpeaking,
   }) {
     return AgentCallState(
       sessionId: sessionId,
@@ -71,6 +74,7 @@ class AgentCallState {
       status: status ?? this.status,
       transcripts: transcripts ?? this.transcripts,
       statusText: statusText ?? this.statusText,
+      isUserSpeaking: isUserSpeaking ?? this.isUserSpeaking,
     );
   }
 }
@@ -130,8 +134,8 @@ class AgentCallStateNotifier extends StateNotifier<AgentCallState?> {
 
     final webrtc = WebrtcManager();
     await webrtc.initialize();
-    // 默认听筒（非扬声器），降低回声。
-    await webrtc.setSpeakerOn(false);
+    // ★AI 通话默认外放（扬声器）：与真人通话(听筒)不同，AI 语音回复走外放更清晰。
+    await webrtc.setSpeakerOn(true);
     _webrtc = webrtc;
     _lastTranscriptSeq = -1;
     _pendingIce.clear();
@@ -230,6 +234,13 @@ class AgentCallStateNotifier extends StateNotifier<AgentCallState?> {
         final transcripts = [...s.transcripts, AgentTranscript(seq: seq, who: who, text: text, isFinal: isFinal)];
         if (transcripts.length > 200) transcripts.removeRange(0, transcripts.length - 200);
         state = s.copyWith(transcripts: transcripts);
+        break;
+      case ChatSignalType.agentSpeech:
+        // 用户说话状态（麦克风动态图标）。
+        final speaking = payload['speaking'] == true;
+        if (s.isUserSpeaking != speaking) {
+          state = s.copyWith(isUserSpeaking: speaking);
+        }
         break;
       case ChatSignalType.agentHangup:
         // 媒体端点主动结束。

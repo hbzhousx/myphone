@@ -26,6 +26,8 @@ enum ChatSignalType {
   agentHangup,
   agentReady,
   agentTranscript,
+  // agentSpeech: bot→客户端，用户说话状态 {speaking: bool}（麦克风动态图标）
+  agentSpeech,
 }
 
 class ChatSignal {

@@ -125,6 +125,10 @@ func (s *Session) bindDash(d *DashScopeClient) {
 			seq := int(time.Now().UnixMilli() % 100000)
 			s.SendTranscript(seq, who, text, true)
 		},
+		// ★用户说话状态：麦克风动态图标（speech_started/stopped）。
+		func(speaking bool) {
+			s.send("agentSpeech", map[string]interface{}{"speaking": speaking})
+		},
 		func(text string) {
 			// 聊天历史回流（bot 明文 chatMessage）。
 			plain := map[string]interface{}{"kind": "agent", "body": text}

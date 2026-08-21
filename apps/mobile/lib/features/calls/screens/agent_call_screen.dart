@@ -188,9 +188,16 @@ class _AgentCallScreenState extends ConsumerState<AgentCallScreen> {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
+                    // ★麦克风：静音→mic_off(红)；说话中→mic 蓝色发光(动态)；沉默→mic(灰)。
                     _AgentCircleButton(
                       icon: _muted ? Icons.mic_off : Icons.mic,
-                      color: _muted ? Colors.red : Colors.white24,
+                      color: _muted
+                          ? Colors.red
+                          : session.isUserSpeaking
+                              ? Colors.lightBlueAccent
+                              : Colors.white24,
+                      size: session.isUserSpeaking && !_muted ? 64 : 56,
+                      glow: session.isUserSpeaking && !_muted,
                       onTap: () {
                         setState(() => _muted = !_muted);
                         ref.read(agentCallStateProvider.notifier).toggleMute();
@@ -289,14 +296,21 @@ class _AgentCircleButton extends StatelessWidget {
   final Color color;
   final double size;
   final VoidCallback onTap;
-  const _AgentCircleButton(
-      {required this.icon,
-      required this.color,
-      required this.onTap,
-      this.size = 56});
+  final bool glow; // 说话中发光（麦克风动态）
+  const _AgentCircleButton({
+    required this.icon,
+    required this.color,
+    required this.onTap,
+    this.size = 56,
+    this.glow = false,
+  });
 
   @override
   Widget build(BuildContext context) {
+    // ★说话中：呼吸发光 + 放大（AnimationController 循环）。
+    if (glow) {
+      return _GlowMicButton(icon: icon, size: size, onTap: onTap);
+    }
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -304,6 +318,68 @@ class _AgentCircleButton extends StatelessWidget {
           height: size,
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
           child: Icon(icon, color: Colors.white, size: size * 0.5)),
+    );
+  }
+}
+
+/// 说话中麦克风：呼吸发光 + 缩放动画。
+class _GlowMicButton extends StatefulWidget {
+  final IconData icon;
+  final double size;
+  final VoidCallback onTap;
+  const _GlowMicButton(
+      {required this.icon, required this.size, required this.onTap});
+
+  @override
+  State<_GlowMicButton> createState() => _GlowMicButtonState();
+}
+
+class _GlowMicButtonState extends State<_GlowMicButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 600),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: widget.onTap,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          // 0→1 呼吸：scale 1.0→1.12，glow 强度 0.3→0.9。
+          final t = _controller.value;
+          final scale = 1.0 + t * 0.12;
+          final glowOpacity = 0.3 + t * 0.6;
+          return Transform.scale(
+            scale: scale,
+            child: Container(
+              width: widget.size,
+              height: widget.size,
+              decoration: BoxDecoration(
+                color: Colors.lightBlueAccent.withOpacity(0.35),
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.lightBlueAccent.withOpacity(glowOpacity),
+                    blurRadius: 20,
+                    spreadRadius: 4,
+                  ),
+                ],
+              ),
+              child: Icon(widget.icon,
+                  color: Colors.lightBlueAccent, size: widget.size * 0.5),
+            ),
+          );
+        },
+      ),
     );
   }
 }

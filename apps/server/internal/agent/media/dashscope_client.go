@@ -23,7 +23,8 @@ type DashScopeClient struct {
 	model   string
 	codec   *OpusCodec
 	play    func(frame []byte)     // 回手机(Opus 帧)
-	sendMsg func(who, text string) // 字幕
+	sendMsg func(who, text string) // 字幕（who: 'user'|'agent'）
+	speech  func(speaking bool)    // 用户说话状态（麦克风动态图标）
 	chatMsg func(text string)      // 聊天历史回流
 
 	mu          sync.Mutex
@@ -32,6 +33,8 @@ type DashScopeClient struct {
 	appendCount int
 	skipCount   int
 	deltaCount  int
+
+	agentBuf string // 当前回复的完整文本累积（audio_transcript.delta 增量 → done 合并发）
 }
 
 // NewDashScopeClient 构造直连客户端；key 为空返回 nil。
@@ -82,10 +85,12 @@ func (c *DashScopeClient) connect() {
 func (c *DashScopeClient) SetCallbacks(
 	play func(frame []byte),
 	sendMsg func(who, text string),
+	speech func(speaking bool),
 	chatMsg func(text string),
 ) {
 	c.play = play
 	c.sendMsg = sendMsg
+	c.speech = speech
 	c.chatMsg = chatMsg
 }
 
@@ -128,6 +133,14 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 			_ = su
 		case "input_audio_buffer.speech_started":
 			log.Printf("[DASHSCOPE] speech started")
+			if c.speech != nil {
+				c.speech(true)
+			}
+		case "input_audio_buffer.speech_stopped":
+			log.Printf("[DASHSCOPE] speech stopped")
+			if c.speech != nil {
+				c.speech(false)
+			}
 		case "conversation.item.input_audio_transcription.completed":
 			if c.sendMsg != nil {
 				c.sendMsg("user", e.Transcript)
@@ -183,14 +196,22 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 				log.Printf("[DASHSCOPE] audio.delta #%d (pcm=%d samples → N frames)", c.deltaCount, len(pcm))
 			}
 		case "response.audio_transcript.delta", "response.output_audio_transcript.delta":
-			if c.sendMsg != nil && e.Delta != "" {
-				c.sendMsg("agent", e.Delta)
-			}
+			// ★增量累积：不逐条发（会碎字），等 done 合并发完整文本。
+			c.agentBuf += e.Delta
 		case "response.audio_transcript.done", "response.output_audio_transcript.done":
-			if c.chatMsg != nil && e.Transcript != "" {
-				c.chatMsg(e.Transcript)
+			// 优先用 done 携带的完整 transcript（若为空则用累积的 delta）。
+			full := e.Transcript
+			if full == "" {
+				full = c.agentBuf
 			}
-			log.Printf("[DASHSCOPE] agent: %s", e.Transcript)
+			c.agentBuf = ""
+			if c.chatMsg != nil && full != "" {
+				c.chatMsg(full)
+			}
+			if c.sendMsg != nil && full != "" {
+				c.sendMsg("agent", full)
+			}
+			log.Printf("[DASHSCOPE] agent: %s", full)
 		case "error":
 			log.Printf("[DASHSCOPE] error: %s", msg)
 		}
