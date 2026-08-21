@@ -774,6 +774,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     return Scaffold(
       appBar: AppBar(
+        // ★显式返回箭头：机器人聊天页经 context.go 进入（无 push 栈），默认无返回按钮。
+        //   统一加 leading，点击回会话列表。
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.go('/conversations'),
+        ),
         // 联系人头像放标题区（名字左边紧靠），不占 leading（保留返回箭头）。
         title: Row(
           mainAxisSize: MainAxisSize.min,
