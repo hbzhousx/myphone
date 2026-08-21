@@ -27,12 +27,9 @@ type DashScopeClient struct {
 	speech  func(speaking bool)    // 用户说话状态（麦克风动态图标）
 	chatMsg func(text string)      // 聊天历史回流
 
-	mu          sync.Mutex
-	conn        *websocket.Conn
-	ready       bool
-	appendCount int
-	skipCount   int
-	deltaCount  int
+	mu     sync.Mutex
+	conn   *websocket.Conn
+	ready  bool
 
 	agentBuf string // 当前回复的完整文本累积（audio_transcript.delta 增量 → done 合并发）
 }
@@ -115,10 +112,6 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 		if json.Unmarshal(msg, &e) != nil {
 			continue
 		}
-		// ★诊断：打印所有事件 type（前 200 字），定位音频回复事件格式。
-		if e.Type != "session.updated" && e.Type != "input_audio_buffer.speech_started" {
-			log.Printf("[DASHSCOPE] event: %s → %s", e.Type, msg)
-		}
 		switch e.Type {
 		case "session.updated":
 			c.mu.Lock()
@@ -151,18 +144,11 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 			// ★DashScope 音频在 `delta` 字段（不是 `audio`）。
 			// ★delta 是大块 PCM(≈320ms)，必须切 20ms 帧逐帧编码——整段一次编码
 			//   超 libopus 单帧上限(5760samples@48k)会整体丢弃。
-			c.deltaCount++
 			buf, err := base64.StdEncoding.DecodeString(e.Delta)
 			if err != nil {
-				if c.deltaCount%50 == 0 {
-					log.Printf("[DASHSCOPE] audio.delta decode fail: %v", err)
-				}
 				continue
 			}
 			if c.codec == nil || c.play == nil {
-				if c.deltaCount%50 == 0 {
-					log.Printf("[DASHSCOPE] audio.delta skipped play=%v codec=%v", c.play != nil, c.codec != nil)
-				}
 				continue
 			}
 			pcm := make([]int16, len(buf)/2)
@@ -185,15 +171,9 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 				}
 				opus, err := c.codec.EncodeFrom24k(chunk)
 				if err != nil {
-					if c.deltaCount%50 == 0 {
-						log.Printf("[DASHSCOPE] encode frame failed: %v (chunk=%d)", err, len(chunk))
-					}
 					continue
 				}
 				c.play(opus)
-			}
-			if c.deltaCount%50 == 0 {
-				log.Printf("[DASHSCOPE] audio.delta #%d (pcm=%d samples → N frames)", c.deltaCount, len(pcm))
 			}
 		case "response.audio_transcript.delta", "response.output_audio_transcript.delta":
 			// ★增量累积：不逐条发（会碎字），等 done 合并发完整文本。
@@ -231,10 +211,6 @@ func (c *DashScopeClient) AppendPCM16k(pcm []int16) {
 		return
 	}
 	if !ready {
-		c.skipCount++
-		if c.skipCount%100 == 0 {
-			log.Printf("[DASHSCOPE] append skipped (not ready) count=%d", c.skipCount)
-		}
 		return
 	}
 	buf := make([]byte, len(pcm)*2)
@@ -246,10 +222,6 @@ func (c *DashScopeClient) AppendPCM16k(pcm []int16) {
 		"type":  "input_audio_buffer.append",
 		"audio": base64.StdEncoding.EncodeToString(buf),
 	}))
-	c.appendCount++
-	if c.appendCount%100 == 0 {
-		log.Printf("[DASHSCOPE] sent %d audio.append", c.appendCount)
-	}
 }
 
 // Interrupt 打断回复(用户插话)。

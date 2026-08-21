@@ -41,8 +41,6 @@ type Session struct {
 
 	mu     sync.Mutex
 	closed bool
-
-	playCount int // 已播放帧数（日志降频用）
 }
 
 // SendToServer 直通 Signaling（pipeline 回 chatMessage 用）。
@@ -115,10 +113,6 @@ func (s *Session) bindDash(d *DashScopeClient) {
 	log.Printf("[MEDIA] %s bindDash to session %s", s.userID, s.sessionID)
 	d.SetCallbacks(
 		func(frame []byte) {
-			if s.playCount%100 == 0 {
-				log.Printf("[MEDIA] %s play frame %d bytes", s.userID, len(frame))
-			}
-			s.playCount++
 			s.PlayFrame(frame)
 		},
 		func(who, text string) {
@@ -290,25 +284,15 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		// 入站用户语音：逐 RTP 包抽 Opus payload。
 		log.Printf("[MEDIA] %s OnTrack fired (track=%s)", userID, tr.Kind())
-		var frameCount int
 		go func() {
 			for {
 				pkt, _, err := tr.ReadRTP()
 				if err != nil {
-					log.Printf("[MEDIA] %s OnTrack read end: %v (frames=%d)", userID, err, frameCount)
+					log.Printf("[MEDIA] %s OnTrack read end: %v", userID, err)
 					break
 				}
 				if len(pkt.Payload) == 0 {
 					continue
-				}
-				frameCount++
-				if frameCount%100 == 0 {
-					// ★诊断：打印 payload 头（Opus 帧以 TOC 字节开头，如 0xF8/0xF9 等）。
-					head := pkt.Payload
-					if len(head) > 4 {
-						head = head[:4]
-					}
-					log.Printf("[MEDIA] %s received %d audio frames (payload=%d head=%x)", userID, frameCount, len(pkt.Payload), head)
 				}
 				m.mu.Lock()
 				gw := m.gateway
@@ -326,10 +310,6 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 					// 方案 A 回退：qwen-audio-agent Gateway。
 					pcm16, err := codec.DecodeTo16k(pkt.Payload)
 					if err != nil {
-						// ★解码失败会导致音频不发 → Gateway 无识别。打日志定位。
-						if frameCount%100 == 0 {
-							log.Printf("[MEDIA] %s DecodeTo16k failed: %v (payload=%d bytes)", userID, err, len(pkt.Payload))
-						}
 						continue
 					}
 					gw.AppendPCM16k(pcm16)
