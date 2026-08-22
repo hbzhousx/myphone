@@ -35,13 +35,22 @@ type Session struct {
 	pipeline  *Pipeline
 
 	// RTP 出站状态（WriteRTP 需自行递增 seq/timestamp/ssrc）。
-	seq  uint16
-	ts   uint32
-	ssrc uint32
+	seq            uint16
+	ts             uint32
+	ssrc           uint32
+	lastFrameTime  time.Time // 上一帧发送时刻(限速用)
 
 	mu     sync.Mutex
 	closed bool
+
+	// ★异步播放队列:play 回调只入队立即返回(不阻塞 readLoop),
+	//   后台 goroutine 按 20ms 节奏发送。打断时 ClearQueue 停止播放。
+	playQueue  [][]byte
+	playSignal chan struct{}
 }
+
+// frameInterval 是 Opus 单帧时长(20ms),PlayFrame 限速按此发送。
+const frameInterval = 20 * time.Millisecond
 
 // SendToServer 直通 Signaling（pipeline 回 chatMessage 用）。
 func (s *Session) SendToServer(userID, typ string, payload map[string]interface{}) {
@@ -81,28 +90,84 @@ func (s *Session) SendHangup() {
 	s.send("agentHangup", map[string]interface{}{})
 }
 
-// PlayFrame 写一帧 Opus 到出站 track（TTS 播放）。
+// PlayFrame 把一帧 Opus 入队,由后台 goroutine 按 20ms 节奏发送。
+// ★不阻塞调用方(readLoop):打断时 DashScope 消息能及时读到。
 func (s *Session) PlayFrame(frame []byte) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed || s.outTrack == nil {
+		s.mu.Unlock()
 		return
 	}
-	s.seq++
-	s.ts += 960 // 48kHz / 20ms = 960 samples/frame
-	pkt := &rtp.Packet{
-		Header: rtp.Header{
-			Version:        2,
-			PayloadType:    111, // opus 静态 PT(与客户端协商一致)
-			SequenceNumber: s.seq,
-			Timestamp:      s.ts,
-			SSRC:           s.ssrc,
-			Marker:         false,
-		},
-		Payload: frame,
+	s.playQueue = append(s.playQueue, frame)
+	s.mu.Unlock()
+	select {
+	case s.playSignal <- struct{}{}:
+	default:
 	}
-	if err := s.outTrack.WriteRTP(pkt); err != nil {
-		log.Printf("[MEDIA] WriteRTP failed: %v", err)
+}
+
+// startPlayback 启动后台发送 goroutine(HandleInit 建会话时调用)。
+// 按 20ms/帧从队列取帧发送;队列空则等待。
+func (s *Session) startPlayback() {
+	go func() {
+		for {
+			s.mu.Lock()
+			if s.closed {
+				s.mu.Unlock()
+				return
+			}
+			var frame []byte
+			if len(s.playQueue) > 0 {
+				frame = s.playQueue[0]
+				s.playQueue = s.playQueue[1:]
+			}
+			s.mu.Unlock()
+			if frame == nil {
+				// 队列空,等信号。
+				select {
+				case <-s.playSignal:
+					continue
+				case <-time.After(frameInterval):
+					continue
+				}
+			}
+			// 限速:距上一帧 20ms 发送。
+			if !s.lastFrameTime.IsZero() {
+				elapsed := time.Since(s.lastFrameTime)
+				if elapsed < frameInterval {
+					time.Sleep(frameInterval - elapsed)
+				}
+			}
+			s.lastFrameTime = time.Now()
+			s.seq++
+			s.ts += 960 // 48kHz / 20ms = 960 samples/frame
+			pkt := &rtp.Packet{
+				Header: rtp.Header{
+					Version:        2,
+					PayloadType:    111, // opus 静态 PT(与客户端协商一致)
+					SequenceNumber: s.seq,
+					Timestamp:      s.ts,
+					SSRC:           s.ssrc,
+					Marker:         false,
+				},
+				Payload: frame,
+			}
+			if err := s.outTrack.WriteRTP(pkt); err != nil {
+				log.Printf("[MEDIA] WriteRTP failed: %v", err)
+			}
+		}
+	}()
+}
+
+// ClearPlayQueue 清空待播帧(打断时调用,立即停止当前回复)。
+func (s *Session) ClearPlayQueue() {
+	s.mu.Lock()
+	s.playQueue = nil
+	s.mu.Unlock()
+	// 唤醒发送 goroutine(它醒来发现队列空则继续等)。
+	select {
+	case s.playSignal <- struct{}{}:
+	default:
 	}
 }
 
@@ -120,7 +185,13 @@ func (s *Session) bindDash(d *DashScopeClient) {
 			s.SendTranscript(seq, who, text, true)
 		},
 		// ★用户说话状态：麦克风动态图标（speech_started/stopped）。
+		//   开始说话(插话)时:①清空播放队列(立即停当前回复声音) ②发 response.cancel
+		//   给 DashScope(取消旧回复生成,避免旧上下文残留导致话题偏)。
 		func(speaking bool) {
+			if speaking {
+				s.ClearPlayQueue()
+				d.Interrupt()
+			}
 			s.send("agentSpeech", map[string]interface{}{"speaking": speaking})
 		},
 		func(text string) {
@@ -245,13 +316,16 @@ func (m *Manager) HandleInit(userID, sessionID string) {
 	// 随机 SSRC。
 	ssrc := uint32(time.Now().UnixNano() & 0xffffffff)
 	s := &Session{
-		userID:    userID,
-		sessionID: sessionID,
-		pc:        pc,
-		outTrack:  outTrack,
-		sig:       m.sig,
-		ssrc:      ssrc,
+		userID:     userID,
+		sessionID:  sessionID,
+		pc:         pc,
+		outTrack:   outTrack,
+		sig:        m.sig,
+		ssrc:       ssrc,
+		playSignal: make(chan struct{}, 8),
 	}
+	// 启动后台播放 goroutine(异步发送,不阻塞 readLoop,支持打断)。
+	s.startPlayback()
 	s.pipeline = NewPipeline(s, m.asr, m.tts, m.agent, userID)
 	// 方向 B：把 DashScope 直连回调接到本会话（回复音频/字幕/聊天回流）。
 	if m.dash != nil {

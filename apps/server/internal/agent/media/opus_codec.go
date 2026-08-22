@@ -43,15 +43,16 @@ func NewOpusCodec() (*OpusCodec, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 16kbps 极低码率 + FEC/DTX，与客户端 OpusConfig.forTier(moderate) 对齐，
-	// 保证 AI 通话在弱网下也不至于听不见。
-	if err := enc.SetBitrate(16000); err != nil {
+	// ★AI 回复语音(连续 TTS)用较高码率：stereo 编码会把码率摊到两声道，
+	//   16kbps→每声道仅 8kbps 音质极差；48kbps 每声道 24kbps 才清晰。
+	//   关 DTX：TTS 连续语音无静音检测需求，DTX 误判会导致听感丢内容。
+	if err := enc.SetBitrate(48000); err != nil {
 		log.Printf("[OPUS] set bitrate failed: %v", err)
 	}
 	if err := enc.SetInBandFEC(true); err != nil {
 		log.Printf("[OPUS] fec failed: %v", err)
 	}
-	if err := enc.SetDTX(true); err != nil {
+	if err := enc.SetDTX(false); err != nil {
 		log.Printf("[OPUS] dtx failed: %v", err)
 	}
 	dec, err := opus.NewDecoder(webrtcRate, channels)

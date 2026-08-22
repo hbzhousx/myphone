@@ -33,6 +33,9 @@ type DashScopeClient struct {
 	ready  bool
 	closed bool // 进程退出标记，禁止重连
 
+	interrupted bool // 打断标记:用户插话后丢弃旧回复的 audio.delta,直到新回复开始
+	interruptAt time.Time // 打断设置时刻(超时兜底重置,防卡死)
+
 	agentBuf string // 当前回复的完整文本累积（audio_transcript.delta 增量 → done 合并发）
 }
 
@@ -64,14 +67,23 @@ func (c *DashScopeClient) connect() {
 	c.conn = conn
 	c.ready = false
 	c.mu.Unlock()
-	// session 配置(与旁路一致,启用 semantic_vad)。
+	// session 配置。
+	// ★打断:改用 server_vad(官方:基于声学,打断更快更稳定;semantic_vad 打断会
+	//   "先斟酌片刻"才发信号 → 插不上嘴)。用回显确认的参数名 threshold/prefix/silence。
 	_ = conn.WriteMessage(websocket.TextMessage, bypassJSON(map[string]interface{}{
 		"type": "session.update",
 		"session": map[string]interface{}{
 			"modalities":         []string{"text", "audio"},
 			"input_audio_format": "pcm",
 			"output_audio_format": "pcm",
-			"turn_detection":     map[string]interface{}{"type": "semantic_vad"},
+			"turn_detection": map[string]interface{}{
+				"type":               "server_vad",
+				"threshold":          0.3,
+				"prefix_padding_ms":  200,
+				"silence_duration_ms": 500,
+				"create_response":    true,
+				"interrupt_response": true,
+			},
 			// ★人设：必须始终用语音回复，不能自称文字模型。
 			"instructions": "你是哪吒，一个全双工语音助手，通过语音与用户对话。你必须始终用语音(音频)回复用户，绝不能声称自己是纯文字模型。回复要自然、简洁、像真人说话。",
 		},
@@ -149,6 +161,19 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 			}
 			log.Printf("[DASHSCOPE] user: %s", e.Transcript)
 		case "response.audio.delta", "response.output_audio.delta":
+			// ★打断后丢弃旧回复的残余音频(否则旧回复播完才轮到新回复 → 插不上嘴)。
+			//   超时兜底:打断 1s 后仍无新回复 → 重置标记(防卡死永久静音)。
+			//   1s 足够 cancel 生效;若无旧回复残余,audio.delta 会很快恢复正常。
+			c.mu.Lock()
+			interrupted := c.interrupted
+			if interrupted && time.Since(c.interruptAt) > 1*time.Second {
+				interrupted = false
+				c.interrupted = false
+			}
+			c.mu.Unlock()
+			if interrupted {
+				continue
+			}
 			// 回复音频(PCM) → Opus → 回手机。
 			// ★DashScope 音频在 `delta` 字段（不是 `audio`）。
 			// ★delta 是大块 PCM(≈320ms)，必须切 20ms 帧逐帧编码——整段一次编码
@@ -201,6 +226,13 @@ func (c *DashScopeClient) readLoop(conn *websocket.Conn) {
 				c.sendMsg("agent", full)
 			}
 			log.Printf("[DASHSCOPE] agent: %s", full)
+		case "response.created", "response.done":
+			// ★新回复开始:清除打断标记,恢复播放新回复的音频。
+			if e.Type == "response.created" {
+				c.mu.Lock()
+				c.interrupted = false
+				c.mu.Unlock()
+			}
 		case "error":
 			log.Printf("[DASHSCOPE] error: %s", msg)
 		}
@@ -263,6 +295,9 @@ func (c *DashScopeClient) AppendPCM16k(pcm []int16) {
 // Interrupt 打断回复(用户插话)。
 func (c *DashScopeClient) Interrupt() {
 	c.mu.Lock()
+	c.interrupted = true // 丢弃之后到达的旧回复 audio.delta
+	c.interruptAt = time.Now()
+	c.agentBuf = "" // 清旧回复累积文本,避免打断后文本拼接错乱
 	conn := c.conn
 	c.mu.Unlock()
 	if conn == nil {

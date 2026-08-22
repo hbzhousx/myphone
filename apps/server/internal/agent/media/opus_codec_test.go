@@ -2,6 +2,7 @@ package media
 
 import (
 	"encoding/base64"
+	"math"
 	"math/rand"
 	"os"
 	"testing"
@@ -76,6 +77,36 @@ func TestOpusEncodeFrom24k(t *testing.T) {
 	}
 	if len(pcm16) == 0 {
 		t.Fatalf("decoded back empty")
+	}
+}
+
+// TestEncodeFrameDuration 验证:480 samples@24k(20ms)编码后,解码回48k
+// 应得到 960 samples/声道(20ms)。若解码 samples ≠ 960,说明编码时长错 → 播放偏快/慢。
+func TestEncodeFrameDuration(t *testing.T) {
+	c, err := NewOpusCodec()
+	if err != nil {
+		t.Fatalf("NewOpusCodec: %v", err)
+	}
+	// 1kHz 正弦波 480 samples @24k = 20ms。
+	pcm24 := make([]int16, frameSize24k) // 480
+	for i := range pcm24 {
+		pcm24[i] = int16(8000 * math.Sin(2*math.Pi*1000*float64(i)/24000))
+	}
+	opusFrame, err := c.EncodeFrom24k(pcm24)
+	if err != nil {
+		t.Fatalf("EncodeFrom24k: %v", err)
+	}
+	t.Logf("encoded %d samples@24k -> opus %d bytes", len(pcm24), len(opusFrame))
+
+	// 解码回 48k stereo:预期 960 samples/声道(20ms)。
+	pcm48 := make([]int16, frameSize48k*2) // 960*2
+	n, err := c.dec48.Decode(opusFrame, pcm48)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	t.Logf("decoded %d samples/channel @48k (预期 960=20ms)", n)
+	if n != frameSize48k {
+		t.Errorf("时长错误: decoded %d samples (预期 %d),播放将偏%v", n, frameSize48k, map[bool]string{true: "快", false: "慢"}[n < frameSize48k])
 	}
 }
 
