@@ -27,7 +27,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.myphone.app"
+        applicationId = "com.myphone.app.debug"
         minSdk = 24 // geolocator_android 要求 minSdk 24（原 flutter.minSdkVersion=21 冲突）
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

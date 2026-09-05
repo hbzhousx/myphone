@@ -65,9 +65,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   void initState() {
     super.initState();
     _inputController.addListener(_onInputChanged);
-    ref.read(chatStateProvider.notifier).setActiveConversation(_conversationId);
-    // 首次进入聊天页引导授权（相机/存储/通知），避免发图时临时弹窗。
+    // ★修复崩溃：initState 在 widget build 期，直接 setActiveConversation 会
+    //   触发 Riverpod "tried to modify a provider while building" 异常。
+    //   移到首帧后（build 完成）再更新 provider。
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(chatStateProvider.notifier).setActiveConversation(_conversationId);
+      // 首次进入聊天页引导授权（相机/存储/通知），避免发图时临时弹窗。
       PermissionService.ensureChatPermissions(context);
     });
     _loadContact();

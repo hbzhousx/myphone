@@ -230,8 +230,36 @@ class AgentCallStateNotifier extends StateNotifier<AgentCallState?> {
         final who = payload['who'] as String? ?? 'agent';
         final text = payload['text'] as String? ?? '';
         final isFinal = payload['is_final'] == true;
-        if (text.isEmpty) return;
-        final transcripts = [...s.transcripts, AgentTranscript(seq: seq, who: who, text: text, isFinal: isFinal)];
+        // ★官方语义（minicpmo45 realtime-api）：delta 为增量碎片，累积到最后
+        //   一条未封口行；final 为整轮终稿（fork response.done 全文），替换
+        //   累积文本并封口（终稿为空则保留累积文本只封口）。
+        final transcripts = [...s.transcripts];
+        final idx = transcripts.lastIndexWhere((t) => t.who == who && !t.isFinal);
+        if (isFinal) {
+          if (idx == -1) {
+            if (text.isEmpty) return;
+            transcripts.add(AgentTranscript(seq: seq, who: who, text: text, isFinal: true));
+          } else {
+            transcripts[idx] = AgentTranscript(
+              seq: seq,
+              who: who,
+              text: text.isEmpty ? transcripts[idx].text : text,
+              isFinal: true,
+            );
+          }
+        } else {
+          if (text.isEmpty) return;
+          if (idx == -1) {
+            transcripts.add(AgentTranscript(seq: seq, who: who, text: text, isFinal: false));
+          } else {
+            transcripts[idx] = AgentTranscript(
+              seq: seq,
+              who: who,
+              text: transcripts[idx].text + text,
+              isFinal: false,
+            );
+          }
+        }
         if (transcripts.length > 200) transcripts.removeRange(0, transcripts.length - 200);
         state = s.copyWith(transcripts: transcripts);
         break;
