@@ -73,15 +73,26 @@ func (c *OpusCodec) DecodeTo16k(opusFrame []byte) ([]int16, error) {
 	if err != nil {
 		return nil, err
 	}
-	// n 是每声道 samples 数。取左声道。
-	frames := n / channels
+	// n 是每声道 samples 数（libopus 语义：opus_decode 返回每声道帧数，绑定直接
+	//   透传不做除法）＝pcm48 交错立体声的总帧数。★2026-08-30 实锤根因：原
+	//   `frames := n / channels` 把帧数错算成一半 → 每包 20ms 语音只保留前 10ms，
+	//   整通电话每隔一段扔掉一半音频，人耳勉强能猜内容，模型完全无法解析 →
+	//   永远回兜底话术（DashScope 时代"听不懂"同根因）。审计实测 159.3 采样/包
+	//   （应 320）即此 bug。
+	frames := n
 	if frames <= 0 {
 		return nil, errDecoderEmpty
 	}
-	// 48k→16k 抽 1/3（左声道）。
+	// 48k→16k 降采样（左声道）。★3 点均值代替裸抽 1/3（2026-08-30 根因六号
+	//   附带修复）：裸抽无抗混叠，8-16kHz 能量折叠进语音频带，辅音发糊 →
+	//   模型对手机语音可懂度骤降（探针 WAV 直连可懂、手机音频只回通用问候）。
+	//   3 点均值 = 简单低通，显著抑制混叠。pcm48 为 stereo 交错，左声道步长
+	//   channels，相邻 48k 采样相隔 channels 个 int16。
 	pcm16 := make([]int16, frames/3)
 	for i := range pcm16 {
-		pcm16[i] = pcm48[i*3*channels] // 左声道采样
+		j := i * 3 * channels // 第 i 组左声道起始下标
+		s := int32(pcm48[j]) + int32(pcm48[j+channels]) + int32(pcm48[j+2*channels])
+		pcm16[i] = int16(s / 3)
 	}
 	return pcm16, nil
 }
