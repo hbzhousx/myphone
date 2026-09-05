@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # ============================================================
-# MyPhone 服务端部署脚本（在阿里云轻量服务器上以 root 执行）
+# MyPhone 服务端部署脚本（生产服务器上以 sudo 执行）
+# 生产服务器：demoserver（bear@59.175.112.234，SSH 端口 8006）
 # 前置：
 #   1) 已运行 install-deps.sh 与 init-db.sh
 #   2) 服务端二进制已放在 /opt/myphone/myphone-server
-#      （本地 build-server.sh 编译后 scp 上传）
+#      （开发机 build-server.sh 编译后 scp 上传：
+#       scp deploy/artifacts/myphone-server demoserver:/tmp/ 然后服务器上
+#       sudo install -m0755 /tmp/myphone-server /opt/myphone/myphone-server）
 # 功能：安装 systemd 单元、以 myphone 用户启动、配置 Nginx 反向代理
 #       （HTTP 80 + WebSocket + 管理后台 Basic Auth）。
 # 可选环境变量：MYPHONE_ADMIN_USER / MYPHONE_ADMIN_PASSWORD（管理后台账号密码）
@@ -21,8 +24,8 @@ ENV_FILE="/etc/myphone/myphone.env"
 ADMIN_USER="${MYPHONE_ADMIN_USER:-admin}"
 
 # ---------- 前置检查 ----------
-[ -f "$BIN" ] || { echo "错误：未找到 $BIN" >&2; echo "请先在开发机运行 build-server.sh，再 scp 到服务器：" >&2; echo "  scp deploy/artifacts/myphone-server root@<公网IP>:/opt/myphone/myphone-server" >&2; exit 1; }
-[ -f "$AGENT_BIN" ] || { echo "错误：未找到 $AGENT_BIN（media-agent）" >&2; echo "请先在开发机运行 build-server.sh，再 scp 到服务器：" >&2; echo "  scp deploy/artifacts/media-agent root@<公网IP>:/opt/myphone/media-agent" >&2; exit 1; }
+[ -f "$BIN" ] || { echo "错误：未找到 $BIN" >&2; echo "请先在开发机运行 build-server.sh，再传到服务器（demoserver）：" >&2; echo "  开发机: scp deploy/artifacts/myphone-server demoserver:/tmp/" >&2; echo "  服务器: sudo install -m0755 /tmp/myphone-server /opt/myphone/myphone-server" >&2; exit 1; }
+[ -f "$AGENT_BIN" ] || { echo "错误：未找到 $AGENT_BIN（media-agent）" >&2; echo "请先在开发机运行 build-server.sh，再传到服务器（demoserver）：" >&2; echo "  开发机: scp deploy/artifacts/media-agent demoserver:/tmp/" >&2; echo "  服务器: sudo install -m0755 /tmp/media-agent /opt/myphone/media-agent" >&2; exit 1; }
 [ -f "$ENV_FILE" ] || { echo "错误：缺少 $ENV_FILE，请先运行 install-deps.sh" >&2; exit 1; }
 
 # ---------- 运行用户 ----------
@@ -33,7 +36,8 @@ fi
 
 # ---------- 安装二进制 + systemd ----------
 mkdir -p "$APP_DIR"
-install -m 0755 "$BIN" "$APP_DIR/myphone-server"
+# 前置检查已要求二进制位于 $APP_DIR；同文件时 install 会报错，跳过自安装
+[ "$BIN" -ef "$APP_DIR/myphone-server" ] || install -m 0755 "$BIN" "$APP_DIR/myphone-server"
 install -m 0644 "$SCRIPT_DIR/systemd/myphone.service" /etc/systemd/system/myphone.service
 
 systemctl daemon-reload
@@ -43,7 +47,7 @@ sleep 1
 echo "==> myphone 服务已启动"
 
 # ---------- 安装 media-agent（v1.50 AI 语音媒体端点） ----------
-install -m 0755 "$AGENT_BIN" "$APP_DIR/media-agent"
+[ "$AGENT_BIN" -ef "$APP_DIR/media-agent" ] || install -m 0755 "$AGENT_BIN" "$APP_DIR/media-agent"
 install -m 0644 "$SCRIPT_DIR/systemd/media-agent.service" /etc/systemd/system/media-agent.service
 systemctl daemon-reload
 systemctl enable --now media-agent

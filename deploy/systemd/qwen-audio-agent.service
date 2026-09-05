@@ -1,0 +1,30 @@
+# qwen-audio-agent 语音网关 systemd 单元（demoserver）
+# 由 install-voice.sh 安装到 /etc/systemd/system/qwen-audio-agent.service
+# 纯 Node 网关不做推理、不占 GPU；监听 127.0.0.1:3101（仅回环）：
+#   - WS /api/realtime（media-agent WS Gateway 兜底链路）
+#   - POST /webrtc/sdp（media-agent WebRTC 上行主链路）
+# 上游：minicpmo provider → ws://127.0.0.1:19080/backend（llama-omni-server）
+# 配置：/etc/myphone/qwen-audio/config.env（QWAUDIO_CONFIG_DIR 指向）
+[Unit]
+Description=qwen-audio-agent voice gateway (minicpmo frontend, :3101)
+After=network.target llama-omni-server.service
+Wants=llama-omni-server.service
+
+[Service]
+Type=simple
+User=bear
+Group=bear
+WorkingDirectory=/home/bear/projects/qwen-audio-agent
+Environment=QWAUDIO_CONFIG_DIR=/etc/myphone/qwen-audio
+Environment=HOME=/home/bear
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /home/bear/projects/qwen-audio-agent/server/src/index.mjs
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

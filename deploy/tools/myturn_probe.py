@@ -63,7 +63,8 @@ def parse(stun):
     return out
 
 def addr_from_xor(v):
-    port = v[2] ^ (MAGIC >> 16)
+    # XOR 编码端口 = 真实端口 ^ (MAGIC>>16)（16 位）：解码需高低字节各自异或
+    port = ((v[2] ^ (MAGIC >> 24)) << 8) | (v[3] ^ ((MAGIC >> 16) & 0xFF))
     ip = '.'.join(str(b ^ ((MAGIC >> ((3-i)*8)) & 0xff)) for i, b in enumerate(v[4:8]))
     return ip, port
 

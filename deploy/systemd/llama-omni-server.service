@@ -1,0 +1,25 @@
+# llama.cpp-omni 全双工语音推理引擎 systemd 单元（demoserver，MiniCPM-o 4.5 GGUF）
+# 由 install-voice.sh 安装到 /etc/systemd/system/llama-omni-server.service
+# 以 bear 用户运行（模型/构建产物在 bear 家目录），钉死 GPU1（GPU0 归 vllm）。
+# 端口 19080 仅本机使用（qwen-audio-agent 的 minicpmo provider 连 ws://127.0.0.1:19080/backend）。
+[Unit]
+Description=llama.cpp-omni realtime engine (MiniCPM-o 4.5, GPU1)
+After=network.target
+
+[Service]
+Type=simple
+User=bear
+Group=bear
+Environment=CUDA_VISIBLE_DEVICES=1
+Environment=HOME=/home/bear
+ExecStart=/home/bear/projects/llama.cpp-omni/build-gcc11-nossl/bin/llama-omni-server --port 19080 --model /home/bear/models/MiniCPM-o-4_5/MiniCPM-o-4_5-Q4_K_M.gguf -ngl 99 --ctx-size 8192
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# GPU 服务不需要 ProtectHome（模型与构建在 /home/bear 下）
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
