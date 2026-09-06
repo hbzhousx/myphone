@@ -50,6 +50,11 @@ type GatewayClient struct {
 	onAudioDelta      func(pcm24 []int16)
 	onVoiceReady      func()
 	onError           func(err error)
+	// onPlaybackClear：打断回调（★2026-09-06 补线）。网关收到上游
+	//   speech_started（服务端 VAD barge-in）时下发 playback.clear{reason:
+	//   user_interruption}，要求客户端立即清空下行播放队列；原实现不消费
+	//   该事件，被打断的回复残音会继续播完（直连模式无此问题）。
+	onPlaybackClear func()
 
 	appendCount int // 已发出的 audio.append 计数（日志用）
 	energyCount int // PCM 能量检测计数（日志用）
@@ -279,6 +284,11 @@ func (g *GatewayClient) dispatch(e struct {
 		if g.onTranscript != nil && e.Role == "assistant" {
 			g.onTranscript(e.Role, e.Content, false)
 		}
+	case "playback.clear":
+		// 打断（barge-in）：清下行播放队列（回调实现含清 pcmBuf 残块）。
+		if g.onPlaybackClear != nil {
+			g.onPlaybackClear()
+		}
 	case "voice.connection":
 		// state: connected / unavailable / ...
 	case "error":
@@ -362,6 +372,12 @@ func (g *GatewayClient) SetCallbacks(
 	g.onAudioDelta = onAudioDelta
 	g.onVoiceReady = onVoiceReady
 	g.onError = onError
+}
+
+// SetPlaybackClearHandler 注入打断回调（playback.clear）。onAudioDelta 与
+// 本回调都只由 readLoop 协程触发，无并发。
+func (g *GatewayClient) SetPlaybackClearHandler(fn func()) {
+	g.onPlaybackClear = fn
 }
 
 // Close 关闭连接。

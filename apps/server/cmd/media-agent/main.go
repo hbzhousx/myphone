@@ -183,6 +183,15 @@ func main() {
 			},
 			func(err error) { log.Printf("[GATEWAY] error: %v", err) },
 		)
+		// ★2026-09-06 打断补线：网关收到上游 speech_started（服务端 VAD
+		//   barge-in）时下发 playback.clear；对齐直连模式的打断体验
+		//   （response.listen → 清残块 + ClearPlayback，真机好评）。
+		//   与 onAudioDelta 同在 readLoop 协程触发，无并发。
+		gw.SetPlaybackClearHandler(func() {
+			pcmBuf = pcmBuf[:0]
+			manager.ClearPlayback()
+			log.Printf("[GATEWAY] playback.clear — downlink flushed")
+		})
 		manager.SetGateway(gw, codec)
 		log.Printf("[MEDIA-AGENT] gateway voice engine: %s", os.Getenv("AGENT_GATEWAY_URL"))
 	}
