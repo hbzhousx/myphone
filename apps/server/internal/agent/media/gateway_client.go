@@ -56,6 +56,14 @@ type GatewayClient struct {
 	//   该事件，被打断的回复残音会继续播完（直连模式无此问题）。
 	onPlaybackClear func()
 
+	// lastPlaybackReceipt：最近一次回执 playback.started 的 responseId
+	//   （★2026-09-10 字幕补线）。网关把 transcript.delta/final 锁在
+	//   playbackStarted 门控后（pending 缓冲只由客户端 playback.started 回执
+	//   触发 flush），从不回执则字幕永锁 pending（真机症状：有声音无字幕，
+	//   直连模式直接消费 audio_transcript 无此问题）。首个下行音频块 ≈ 播放
+	//   开始，据此按 responseId 去重回执。仅 readLoop 协程读写，无并发。
+	lastPlaybackReceipt string
+
 	appendCount int // 已发出的 audio.append 计数（日志用）
 	energyCount int // PCM 能量检测计数（日志用）
 
@@ -231,6 +239,7 @@ func (g *GatewayClient) readLoop(conn *websocket.Conn) {
 			Delta      string `json:"delta"`
 			State      string `json:"state"`
 			Message    string `json:"message"`
+			ResponseId string `json:"responseId"`
 		}
 		if json.Unmarshal(msg, &event) != nil {
 			continue
@@ -248,6 +257,7 @@ func (g *GatewayClient) dispatch(e struct {
 	Delta      string `json:"delta"`
 	State      string `json:"state"`
 	Message    string `json:"message"`
+	ResponseId string `json:"responseId"`
 }) {
 	switch e.Type {
 	case "voice.ready":
@@ -259,6 +269,13 @@ func (g *GatewayClient) dispatch(e struct {
 			g.onVoiceReady()
 		}
 	case "audio.delta":
+		// ★2026-09-10 字幕补线：每个 response 的首个下行音频块 ≈ 播放开始，
+		//   回执 playback.started 解锁网关字幕门控（flush pending + 后续
+		//   delta 直发）。按 responseId 去重，同一回复只回执一次。
+		if e.ResponseId != "" && e.ResponseId != g.lastPlaybackReceipt {
+			g.lastPlaybackReceipt = e.ResponseId
+			g.send(map[string]interface{}{"type": "playback.started", "responseId": e.ResponseId})
+		}
 		// PCM base64 → int16。sampleRate 应=24000。
 		buf, err := base64.StdEncoding.DecodeString(e.Audio)
 		if err != nil {
