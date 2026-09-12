@@ -49,6 +49,14 @@ type Session struct {
 	playSignal chan struct{}
 	playCount  int // 已入队播放帧计数（调试）
 
+	// ★播放预缓冲（2026-09-12）：一轮回复开头先攒 prebufferFrames 帧再开口。
+	//   引擎供帧比实时慢 ~3%（实测每块 969ms 音频要 ~1000ms 才到，34s 长回复
+	//   累计 1.1s 净欠载 = 用户听感的"尾句卡顿"）。攒够再开口把这段"迟到"
+	//   吸收进缓冲区，代价=每轮开口晚 1.2s。
+	priming       bool      // 攒帧中（不发送）
+	primeArmed    bool      // 强制重新预缓冲（打断清队列后的一轮）
+	primeDeadline time.Time // 最迟开口时刻（短回复兜底）
+
 	// ★字幕序号（每会话单调递增）。此前用 UnixMilli%100000，每 100s 回绕一次，
 	//   手机端 seq 去重会丢弃之后所有字幕（问题③"字幕不全"的另一半根因）。
 	transcriptSeq int
@@ -56,6 +64,17 @@ type Session struct {
 
 // frameInterval 是 Opus 单帧时长(20ms),PlayFrame 限速按此发送。
 const frameInterval = 20 * time.Millisecond
+
+const (
+	// prebufferFrames 帧（1200ms）攒够即开口；prebufferDuration 是最迟开口时限，
+	// 保证不足 1200ms 的短回复也能播出去（不能无限等）。
+	prebufferFrames   = 60
+	prebufferDuration = prebufferFrames * frameInterval
+	// primeIdleGap 是"新一轮回复"的判据：播放器静默超过它，后续帧重新攒。
+	// 取值须明显大于引擎块间到达间隔（实测 ~1000ms），否则会把一轮中间的
+	// 停顿误判成新一轮、在原本的长停顿上再叠 1.2s 静音。
+	primeIdleGap = 2500 * time.Millisecond
+)
 
 // SendToServer 直通 Signaling（pipeline 回 chatMessage 用）。
 func (s *Session) SendToServer(userID, typ string, payload map[string]interface{}) {
@@ -125,6 +144,29 @@ func (s *Session) PlayFrame(frame []byte) {
 	}
 }
 
+// stepPrime 推进预缓冲状态机，返回 true 表示当前帧可以发送。
+// ★调用方必须持 s.mu（读写 priming/primeDeadline/playQueue/lastFrameTime）。
+// 新一轮回复的判据 = 打断清过队列（primeArmed）或播放器已静默 primeIdleGap；
+// 放行判据 = 攒够 prebufferFrames 帧 或 到 primeDeadline（短回复兜底，不能让
+// 不足 1200ms 的回复无限等）。
+func (s *Session) stepPrime() bool {
+	if !s.priming && len(s.playQueue) > 0 &&
+		(s.primeArmed || s.lastFrameTime.IsZero() ||
+			time.Since(s.lastFrameTime) > primeIdleGap) {
+		s.priming = true
+		s.primeArmed = false
+		s.primeDeadline = time.Now().Add(prebufferDuration)
+	}
+	if !s.priming {
+		return true
+	}
+	if len(s.playQueue) >= prebufferFrames || time.Now().After(s.primeDeadline) {
+		s.priming = false
+		return true
+	}
+	return false
+}
+
 // startPlayback 启动后台发送 goroutine(HandleInit 建会话时调用)。
 // 按 20ms/帧从队列取帧发送;队列空则等待。
 func (s *Session) startPlayback() {
@@ -134,6 +176,16 @@ func (s *Session) startPlayback() {
 			if s.closed {
 				s.mu.Unlock()
 				return
+			}
+			// ★预缓冲：新一轮回复开头先攒够 prebufferFrames 帧（或到时限）再开口；
+			//   攒帧期间不取帧，等下一帧到达或 20ms 后重判（保证时限生效）。
+			if !s.stepPrime() {
+				s.mu.Unlock()
+				select {
+				case <-s.playSignal:
+				case <-time.After(frameInterval):
+				}
+				continue
 			}
 			var frame []byte
 			if len(s.playQueue) > 0 {
@@ -182,6 +234,10 @@ func (s *Session) startPlayback() {
 func (s *Session) ClearPlayQueue() {
 	s.mu.Lock()
 	s.playQueue = nil
+	// ★打断后的一轮重新预缓冲：清队列若不复位，新回复会接着零缓冲的旧状态
+	//   直接开口（预缓冲对打断后的每一轮都失效）。
+	s.priming = false
+	s.primeArmed = true
 	s.mu.Unlock()
 	// 唤醒发送 goroutine(它醒来发现队列空则继续等)。
 	select {
